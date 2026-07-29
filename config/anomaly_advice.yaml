@@ -1,0 +1,299 @@
+# ROV 通用异常语义库
+#
+# 这个文件只定义“异常类型可能意味着什么、可能关联哪些 ROV 系统”。
+# 它不绑定具体任务编号或子任务阶段，也不直接写死最终回复建议。
+# 运行时由异常模块结合 current_subtask、failed_criteria、latest_state 和
+# anomaly_state 生成结构化诊断上下文，最终回复由大模型基于上下文组织。
+
+status_values:
+  normal: "正常"
+  abnormal: "异常"
+  unknown: "未知"
+
+component_groups:
+  感知系统:
+    name: "感知系统"
+    meaning: "负责水下图像、声呐、照明和目标观测信息获取。"
+    includes:
+      - 水下相机
+      - 声呐
+      - 水下照明
+      - 感知融合
+
+  导航定位系统:
+    name: "导航定位系统"
+    meaning: "负责 ROV 的位置、姿态、深度和状态估计。"
+    includes:
+      - 惯性测量单元
+      - 多普勒测速仪
+      - 深度计
+      - 水声定位
+      - 状态估计
+
+  推进与运动控制系统:
+    name: "推进与运动控制系统"
+    meaning: "负责 ROV 的移动、悬停、姿态保持和运动执行。"
+    includes:
+      - 推进器
+      - ROV本体运动控制器
+      - 姿态控制
+      - 定点悬停控制
+
+  机械臂与作业系统:
+    name: "机械臂与作业系统"
+    meaning: "负责抓取、插入、旋转、按压、对接等近距离作业动作。"
+    includes:
+      - 机械臂
+      - 末端执行器
+      - 夹爪
+      - 作业工具
+      - 力反馈
+
+  规划决策系统:
+    name: "规划决策系统"
+    meaning: "负责路径、轨迹、任务步骤、避障和可达性判断。"
+    includes:
+      - 路径规划器
+      - 运动规划器
+      - 任务规划器
+      - 碰撞检测
+
+  通信与接口系统:
+    name: "通信与接口系统"
+    meaning: "负责指令下发、状态反馈和模块间数据同步。"
+    includes:
+      - 脐带缆通信
+      - ROV接口
+      - 传感器接口
+      - 执行机构接口
+
+  电源与能源系统:
+    name: "电源与能源系统"
+    meaning: "负责供电、电源分配和能源状态保障。"
+    includes:
+      - 电源供应
+      - 电池
+      - 电源分配
+
+anomaly_types:
+  data_commun:
+    name: "通信与数据异常"
+    priority: 1
+    action_type: "check_communication_and_data"
+    meaning: "指令、状态反馈或模块间数据传输可能存在延迟、丢失或不一致。"
+    candidate_component_groups:
+      - 通信与接口系统
+      - 感知系统
+      - 导航定位系统
+    component_selection_rule: "请结合当前任务背景、当前子任务职责、未满足判据、failure_reactions 和 evidence_summary，自行判断候选系统中哪些与当前异常直接相关；只展开有直接依据的系统，不要平均展开全部候选系统。"
+    reasoning_hints:
+      - "如果任务状态长时间不更新、反馈缺失、模块超时，优先考虑通信与接口系统。"
+      - "如果多个系统状态同时异常，应考虑通信链路或接口同步问题。"
+      - "如果某个传感器或执行机构的状态缺失，应先确认数据是否正常上报，再判断设备本身。"
+
+  perception:
+    name: "感知异常"
+    priority: 2
+    action_type: "check_perception_and_observation"
+    meaning: "观测信息不足或质量不稳定，导致目标、环境或作业状态难以可靠判断。"
+    candidate_component_groups:
+      - 感知系统
+      - 导航定位系统
+    component_selection_rule: "请结合当前任务背景、当前子任务职责、未满足判据、failure_reactions 和 evidence_summary，自行判断候选系统中哪些与当前异常直接相关；只展开有直接依据的系统，不要平均展开全部候选系统。"
+    reasoning_hints:
+      - "如果问题与图像、声呐、目标识别、可见特征、观测数量有关，优先考虑感知系统。"
+      - "如果问题表现为位置、姿态或环境状态判断不稳定，也可能关联导航定位系统。"
+      - "回答时应使用可能、倾向于、建议排查等柔和表述，不要直接断定传感器损坏。"
+
+  planning:
+    name: "规划异常"
+    priority: 3
+    action_type: "check_planning_constraints"
+    meaning: "当前目标、环境约束或机器人状态可能使路径、轨迹或作业方案难以生成。"
+    candidate_component_groups:
+      - 规划决策系统
+      - 导航定位系统
+      - 推进与运动控制系统
+      - 机械臂与作业系统
+    component_selection_rule: "请结合当前任务背景、当前子任务职责、未满足判据、failure_reactions 和 evidence_summary，自行判断候选系统中哪些与当前异常直接相关；只展开有直接依据的系统，不要平均展开全部候选系统。"
+    reasoning_hints:
+      - "如果卡在接近目标、路径生成、避障、可达性判断，优先考虑规划决策系统。"
+      - "如果规划目标涉及机械臂作业，也要考虑机械臂与作业系统的可达性约束。"
+      - "规划异常可能由感知或定位信息不足触发，回答时应结合未满足判据判断原因链。"
+
+  execution:
+    name: "执行异常"
+    priority: 4
+    action_type: "check_execution_system"
+    meaning: "指令已经下发或动作已经开始，但 ROV 实际运动或作业结果没有达到预期。"
+    candidate_component_groups:
+      - 推进与运动控制系统
+      - 机械臂与作业系统
+      - 通信与接口系统
+    component_selection_rule: "请结合当前任务背景、当前子任务职责、未满足判据、failure_reactions 和 evidence_summary，自行判断候选系统中哪些与当前异常直接相关；只展开有直接依据的系统，不要平均展开全部候选系统。"
+    reasoning_hints:
+      - "如果问题发生在移动、悬停、姿态保持或靠近目标阶段，优先考虑推进与运动控制系统。"
+      - "如果问题发生在抓取、旋转、按压、对接、插拔等作业阶段，优先考虑机械臂与作业系统。"
+      - "如果指令下发后没有有效反馈，也可能关联通信与接口系统。"
+
+  plant:
+    name: "操作对象或环境异常"
+    priority: 5
+    action_type: "check_target_and_environment"
+    meaning: "目标机构、接触关系或周围环境状态可能导致作业动作无法顺利完成。"
+    candidate_component_groups:
+      - 机械臂与作业系统
+      - 感知系统
+    component_selection_rule: "请结合当前任务背景、当前子任务职责、未满足判据、failure_reactions 和 evidence_summary，自行判断候选系统中哪些与当前异常直接相关；只展开有直接依据的系统，不要平均展开全部候选系统。"
+    reasoning_hints:
+      - "如果问题发生在接触、夹取、插入、旋转或对接后，需考虑操作对象状态或接触关系。"
+      - "如果无法确认操作对象是否到位，应结合感知系统和机械臂与作业系统共同判断。"
+      - "不要直接断定目标机构故障，除非任务状态中明确给出卡滞、碰撞或硬件故障证据。"
+
+  verification:
+    name: "验证异常"
+    priority: 6
+    action_type: "check_result_verification"
+    meaning: "动作或流程已经执行，但系统无法确认任务结果是否满足要求。"
+    candidate_component_groups:
+      - 感知系统
+      - 导航定位系统
+      - 机械臂与作业系统
+    component_selection_rule: "请结合当前任务背景、当前子任务职责、未满足判据、failure_reactions 和 evidence_summary，自行判断候选系统中哪些与当前异常直接相关；只展开有直接依据的系统，不要平均展开全部候选系统。"
+    reasoning_hints:
+      - "如果无法确认目标状态、作业结果或最终位姿，优先考虑感知系统和导航定位系统。"
+      - "如果是机械臂作业后的结果确认，也要考虑机械臂与作业系统的反馈是否充分。"
+
+default_advice:
+  missing_anomaly_state: "当前任务没有可用的 anomaly_state，请先补充后端异常状态。"
+  no_abnormal_anomaly: "当前 anomaly_state 中没有异常状态。"
+  no_supported_abnormal_anomaly: "当前异常状态没有匹配到通用异常类型。"
+
+
+task_anomaly_profiles:
+  S1:
+    name: "移动至采油树控制面板附近"
+    goal: "靠近目标区域，为后续识别和作业建立稳定观测条件。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响导航、感知和运动状态反馈的可信度。"
+      - type: perception
+        relevance: high
+        role: "影响目标区域观测、控制面板可见性和视觉特征获取。"
+      - type: planning
+        relevance: medium
+        role: "影响接近路径、避障约束和目标位姿可达性。"
+      - type: execution
+        relevance: medium
+        role: "影响 ROV 移动、悬停和姿态保持。"
+
+  S2:
+    name: "视觉识别插孔和插头的位置"
+    goal: "确认插孔、插头及其位姿，为后续机械臂作业提供目标信息。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响视觉图像、识别结果和位姿估计结果上报。"
+      - type: perception
+        relevance: high
+        role: "影响插孔、插头识别、目标可见性和位姿估计稳定性。"
+
+  S3:
+    name: "机械臂原点到夹取起点的路径规划"
+    goal: "为机械臂从初始状态移动到夹取准备位姿生成可执行路径。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响规划输入、目标位姿和机械臂状态数据完整性。"
+      - type: planning
+        relevance: high
+        role: "影响机械臂可达性、碰撞约束、关节限制和夹取起点路径生成。"
+
+  S4:
+    name: "夹取插头"
+    goal: "使用机械臂和末端执行器稳定夹取目标插头。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响机械臂、夹爪和夹取反馈状态上报。"
+      - type: execution
+        relevance: high
+        role: "影响机械臂、夹爪和末端执行动作。"
+      - type: plant
+        relevance: high
+        role: "影响插头接触关系、夹取稳定性和目标状态。"
+      - type: perception
+        relevance: medium
+        role: "影响夹取目标位姿确认。"
+
+  S5:
+    name: "机械臂起点到插入终点的路径规划"
+    goal: "基于插孔、插头和夹取状态规划机械臂插入路径。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响插入规划所需的位姿、夹取状态和机械臂状态输入。"
+      - type: perception
+        relevance: high
+        role: "影响插孔、插头位姿估计和插入方向判断。"
+      - type: planning
+        relevance: high
+        role: "影响插入目标位姿、机械臂可达性、碰撞约束和轨迹生成。"
+
+  S6:
+    name: "执行插入"
+    goal: "控制机械臂将插头插入目标插孔并完成接触作业。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响插入过程反馈、机械臂状态和接触状态上报。"
+      - type: perception
+        relevance: medium
+        role: "影响插孔定位、插入方向和末端位姿确认。"
+      - type: execution
+        relevance: high
+        role: "影响机械臂轨迹跟踪、插入动作、控制器和力控执行。"
+      - type: plant
+        relevance: high
+        role: "影响插头与插孔接触关系、卡滞、错位或干涉判断。"
+
+  S7:
+    name: "视觉 check 确认插入结果"
+    goal: "通过视觉或状态反馈确认插入结果是否满足任务要求。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响视觉检查图像、识别结果和验证状态上报。"
+      - type: perception
+        relevance: high
+        role: "影响插入结果视觉确认、图像质量和识别置信度。"
+      - type: execution
+        relevance: medium
+        role: "影响执行反馈与视觉验证结果的一致性判断。"
+      - type: plant
+        relevance: high
+        role: "影响实际插入到位、接触稳定性和目标机构状态确认。"
+      - type: verification
+        relevance: high
+        role: "影响系统对插入结果是否满足要求的最终确认。"
+
+  S8:
+    name: "返程与复位"
+    goal: "ROV 和机械臂安全脱离作业区域并回到复位状态。"
+    possible_anomalies:
+      - type: data_commun
+        relevance: high
+        role: "影响返程定位、机械臂复位和整体状态反馈。"
+      - type: perception
+        relevance: medium
+        role: "影响返程定位、复位区域和安全退出路径感知。"
+      - type: planning
+        relevance: high
+        role: "影响返程路径、避障约束和机械臂复位路径。"
+      - type: execution
+        relevance: high
+        role: "影响 ROV 返程运动、姿态控制和机械臂复位执行。"
+      - type: plant
+        relevance: medium
+        role: "影响机械臂、末端执行器与环境结构是否安全脱离。"

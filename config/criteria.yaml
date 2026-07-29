@@ -1,0 +1,124 @@
+# 完成判据配置（硬判据、软判据、人工确认需求）
+# ##########
+# 修改内容：在每个子任务判据下新增 explanations，用于解释判据不满足时代表的自然语言含义。
+# 说明边界：这里只说明字段含义和不满足含义，不展开异常诊断建议；建议仍由异常建议模块或失败策略生成。
+# ################
+S1_criteria:
+  hard:
+    distance_error_max: 0.1      # 米
+    angle_error_max: 10.0        # 度
+    speed_stable_frames: 5       # 连续稳定帧数
+  soft:
+    min_grid_count: 10
+    panel_visible_flag: 1
+  require_approval: true
+  # ########## 修改内容：S1 判据解释 ################
+  explanations:
+    distance_error_max:
+      name: "距离误差"
+      unmet_meaning: "当前距离误差超过允许范围，说明 ROV 尚未稳定到达控制面板附近的目标距离"
+    angle_error_max:
+      name: "角度误差"
+      unmet_meaning: "当前姿态角度偏差超过允许范围，说明 ROV 面向控制面板的姿态还未达到接近要求"
+    speed_stable_frames:
+      name: "速度稳定帧数"
+      unmet_meaning: "当前连续稳定帧数不足，说明 ROV 接近阶段的运动状态还不够稳定"
+    min_grid_count:
+      name: "有效网格数量"
+      unmet_meaning: "当前可用视觉网格数量不足，说明控制面板附近的视觉观测信息还不够充分"
+    panel_visible_flag:
+      name: "面板可见标志"
+      unmet_meaning: "当前控制面板未可见，说明 ROV 尚未获得可靠的控制面板视野"
+
+S2_criteria:
+  hard:
+    slot_pose_delta_max: 0.01    # 米（位置估计变化量）
+    plug_pose_delta_max: 0.01
+  soft:
+    slot_stable_flag: 1
+    plug_stable_flag: 1
+  require_approval: true
+  # ########## 修改内容：S2 判据解释 ################
+  explanations:
+    slot_pose_delta_max:
+      name: "插孔位姿变化量"
+      unmet_meaning: "当前插孔位姿估计变化超过允许范围，说明插孔定位结果还不稳定"
+    plug_pose_delta_max:
+      name: "插头位姿变化量"
+      unmet_meaning: "当前插头位姿估计变化超过允许范围，说明插头定位结果还不稳定"
+    slot_stable_flag:
+      name: "插孔稳定标志"
+      unmet_meaning: "当前插孔识别结果不稳定，说明插孔位置识别尚未达到稳定条件"
+    plug_stable_flag:
+      name: "插头稳定标志"
+      unmet_meaning: "当前插头识别结果不稳定，说明插头位置识别尚未达到稳定条件"
+
+S3_criteria:
+  hard:
+    ik_valid_flag: 1
+  soft: {}
+  require_approval: true
+  # ########## 修改内容：S3 判据解释 ################
+  explanations:
+    ik_valid_flag:
+      name: "逆运动学有效标志"
+      unmet_meaning: "当前没有可用的逆运动学解，说明从机械臂原点到夹取起点的路径规划暂未得到可执行解"
+
+S4_criteria:
+  hard:
+    grasp_done_flag: 1
+  soft: {}
+  require_approval: true
+  # ########## 修改内容：S4 判据解释 ################
+  explanations:
+    grasp_done_flag:
+      name: "夹取完成标志"
+      unmet_meaning: "当前夹取动作未完成，说明插头夹取步骤可能出现问题"
+
+S5_criteria:
+  hard:
+    ik_valid_flag: 1
+  soft: {}
+  require_approval: true
+  # ########## 修改内容：S5 判据解释 ################
+  explanations:
+    ik_valid_flag:
+      name: "逆运动学有效标志"
+      unmet_meaning: "当前没有可用的逆运动学解，说明从夹取起点到插入终点的路径规划暂未得到可执行解"
+
+S6_criteria:
+  hard:
+    insert_done_flag: 1
+  soft: {}
+  require_approval: true
+  # ########## 修改内容：S6 判据解释 ################
+  explanations:
+    insert_done_flag:
+      name: "插入完成标志"
+      unmet_meaning: "当前插入动作未完成，说明插头插入步骤可能出现问题"
+
+S7_criteria:
+  hard:
+    visual_check_flag: 1
+  soft: {}
+  require_approval: true       # 最终 check 可由人工确认
+  # ########## 修改内容：S7 判据解释 ################
+  explanations:
+    visual_check_flag:
+      name: "视觉确认标志"
+      unmet_meaning: "当前视觉检查无法检测出插入结果已完成，说明插头插入结果可能存在问题"
+
+S8_criteria:
+  hard:
+    arm_reset_flag: 1
+    return_position_error_max: 0.1
+  soft: {}
+  require_approval: true
+  # ########## 修改内容：S8 判据解释 ################
+  explanations:
+    arm_reset_flag:
+      name: "机械臂复位标志"
+      unmet_meaning: "当前机械臂复位未完成，说明返程与复位阶段机械臂尚未回到安全复位状态"
+    return_position_error_max:
+      name: "返程位置误差"
+      unmet_meaning: "当前返程位置误差超过允许范围，说明 ROV 返程位置还未达到复位要求"

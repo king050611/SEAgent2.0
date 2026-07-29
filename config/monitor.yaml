@@ -1,0 +1,14 @@
+server:
+  host: "0.0.0.0"
+  port: 8889
+
+llm:
+    model_path: "/root/autodl-tmp/Qwen3.5-9B"
+
+persistence:
+  type: "file"
+  directory: "data/tasks"               # 任务状态直接存放在 data/tasks/ 下
+
+logging:
+  level: "INFO"
+  file: "task_monitor.log"

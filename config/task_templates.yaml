@@ -1,0 +1,136 @@
+# 子任务模板定义（S1~S8 完全参照技术方案文档）
+subtasks:
+  - id: S1
+    name: "移动至采油树控制面板附近"
+    depends_on: []
+    criteria_ref: "S1_criteria"
+    next_on_success: "S2"
+    max_retries: 3
+    timeout_seconds: 60
+    anomalies:
+      distance_error_timeout: "target_unreachable"
+      angle_error_timeout: "orientation_failed"
+      speed_not_stable: "motion_unstable"
+      panel_not_visible: "panel_out_of_view"
+
+  - id: S2
+    name: "视觉识别插孔和插头的位置"
+    depends_on: ["S1"]
+    criteria_ref: "S2_criteria"
+    next_on_success: "S3"
+    max_retries: 3
+    timeout_seconds: 30
+    anomalies:
+      slot_not_detected: "slot_missing"
+      plug_not_detected: "plug_missing"
+      estimation_unstable: "vision_unstable"
+      hole_conflict: "hole_conflict"
+
+  - id: S3
+    name: "机械臂原点到夹取起点的路径规划"
+    depends_on: ["S2"]
+    criteria_ref: "S3_criteria"
+    next_on_success: "S4"
+    max_retries: 2
+    timeout_seconds: 10
+    anomalies:
+      ik_no_solution: "rollback_to_S2"
+      path_not_found: "manual_intervention"
+
+  - id: S4
+    name: "夹取插头"
+    depends_on: ["S3"]
+    criteria_ref: "S4_criteria"
+    next_on_success: "S5"
+    max_retries: 2
+    timeout_seconds: 15
+    anomalies:
+      grasp_failed: "retry_or_rollback_S3"
+
+  - id: S5
+    name: "机械臂起点到插入终点的路径规划"
+    depends_on: ["S4"]
+    criteria_ref: "S5_criteria"
+    next_on_success: "S6"
+    max_retries: 2
+    timeout_seconds: 10
+    anomalies:
+      ik_no_solution: "rollback_to_S2"
+      path_not_found: "manual_intervention"
+
+  - id: S6
+    name: "执行插入"
+    depends_on: ["S5"]
+    criteria_ref: "S6_criteria"
+    next_on_success: "S7"
+    max_retries: 2
+    timeout_seconds: 15
+    anomalies:
+      insert_failed: "retry_or_rollback_S5"
+
+  - id: S7
+    name: "视觉 check 确认插入结果"
+    depends_on: ["S6"]
+    criteria_ref: "S7_criteria"
+    next_on_success: "S8"
+    max_retries: 1
+    timeout_seconds: 10
+    anomalies:
+      visual_check_failed: "rollback_to_S5_or_manual"
+
+  - id: S8
+    name: "返程与复位"
+    depends_on: ["S7"]
+    criteria_ref: "S8_criteria"
+    next_on_success: null
+    max_retries: 2
+    timeout_seconds: 20
+    anomalies:
+      arm_reset_failed: "manual_intervention"
+      return_position_error: "manual_intervention"
+
+# 异常分支动作映射（全局）
+anomaly_actions:
+  target_unreachable:
+    action: "fail_task"
+    message: "目标点不可达，请检查环境或重新规划路径"
+  orientation_failed:
+    action: "retry_subtask"
+    message: "姿态对准失败，尝试重试"
+  motion_unstable:
+    action: "retry_subtask"
+    message: "运动未稳定，重试S1"
+  panel_out_of_view:
+    action: "retry_subtask"
+    message: "面板未进入视觉范围，重试S1"
+  slot_missing:
+    action: "fail_task"
+    message: "插孔未检测到，任务终止"
+  plug_missing:
+    action: "fail_task"
+    message: "插头未检测到，任务终止"
+  vision_unstable:
+    action: "retry_subtask"
+    message: "视觉估计不稳定，重试S2"
+  hole_conflict:
+    action: "manual_intervention"
+    message: "目标孔位冲突，需人工选择"
+  rollback_to_S2:
+    action: "rollback"
+    target: "S2"
+    message: "逆运动学无解，回退至S2重新识别"
+  rollback_to_S5_or_manual:
+    action: "rollback_or_manual"
+    target: "S5"
+    message: "视觉check未通过，回退S5或人工介入"
+  manual_intervention:
+    action: "manual_intervention"
+    message: "需要人工介入处理"
+  retry_or_rollback_S3:
+    action: "retry_or_rollback"
+    target: "S3"
+    message: "夹取失败，重试或回退S3"
+  retry_or_rollback_S5:
+    action: "retry_or_rollback"
+    target: "S5"
+    message: "插入失败，重试或回退S5"

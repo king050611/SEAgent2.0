@@ -1,0 +1,446 @@
+# AnomalyAdvisor 异常建议系统测试补充
+
+本文档是在 `README.md` 原有测试流程基础上增加的异常建议模块测试。除额外加入 `anomaly_state` 字段外，尽量保持原 README 的 task_id、接口格式、子任务流程和测试方式不变。
+
+固定任务 ID：`TI2026021192`
+
+服务地址：`http://localhost:8889`
+
+---
+"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"abnormal","plant":"normal"},
+
+## 一、测试前准备
+
+### 1. 启动系统
+
+```markdown
+python run.py
+```
+
+### 2. 放置任务文件
+
+```bash
+cp task_intent_TI2026021192.json task/
+```
+
+### 3. 确认任务已创建
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/tasks | jq .
+```
+
+### 4. 查看当前任务状态
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq .
+```
+
+---
+
+## 二、测试说明
+
+本文件中的异常建议测试遵循以下原则：
+
+1. 沿用 `README.md` 中的固定任务 `TI2026021192`。
+2. 沿用原有 `status_update` 接口。
+3. 沿用原有 `criteria_details` 字段和值来制造成功或失败。
+4. 只在需要触发异常建议的失败上报中额外加入 `anomaly_state`。
+5. 查询异常建议时仍然使用 `/api/query`。
+
+异常建议生成后，可以通过以下命令检查：
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice'
+```
+
+---
+
+## 三、正常推进到 S4 前置步骤
+
+如果要测试 S4 夹取失败建议，先按 README 正常推进 S1、S2、S3。
+
+### S1 正常通过
+
+硬判据满足，但存在异常
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.05,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1,"plug_stable_flag":1},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"abnormal","plant":"normal"}}}'
+```
+
+硬判据不满足，且存在异常(excution)
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.15,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1,"plug_stable_flag":1},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"abnormal","plant":"normal"}}}'
+```
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.15,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1,"plug_stable_flag":1},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"abnormal","execution":"abnormal","plant":"abnormal"}}}'
+
+硬判据不满足，且存在异常(planning+excution)
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.15,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1,"plug_stable_flag":1},"anomaly_state":{"data_commun":"abnormal","perception":"normal","planning":"abnormal","execution":"abnormal","plant":"normal"}}}'
+```
+
+软判据不满足，且存在异常
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.05,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":8,"panel_visible_flag":1,"plug_stable_flag":1},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"abnormal","execution":"abnormal","plant":"normal"},"evidence_summary":"距离误差0.05m，角度误差5°，速度稳定，面板可见度低。"}}'
+
+### S2 正常通过
+
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.005,"plug_pose_delta_m":0.006,"slot_stable_flag":1,"plug_stable_flag":1}}}'
+```
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.05,"plug_pose_delta_m":0.006,"slot_stable_flag":1,"plug_stable_flag":1}}}'
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.05,"plug_pose_delta_m":0.006,"slot_stable_flag":1,"plug_stable_flag":1},"anomaly_state":{"data_commun":"abnormal","perception":"abnormal","planning":"abnormal","execution":"abnormal","plant":"normal"}}}'
+```
+
+### S3 正常通过
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S3","status":"reported","criteria_details":{"ik_valid_flag":1},"evidence_summary":"逆运动学求解有效。"}}'
+```
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S3","status":"reported","criteria_details":{"ik_valid_flag":1},"anomaly_state":{"data_commun":"abnormal","perception":"abnormal","planning":"abnormal","execution":"abnormal","plant":"normal"}}}'
+```
+### S6 正常通过
+正常
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S6","status":"reported","criteria_details":{"insert_done_flag":1},"evidence_summary":"插入动作完成。"}}'
+```
+失败
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S6","status":"reported","criteria_details":{"insert_done_flag":0},"anomaly_state":{"data_commun":"abnormal","perception":"abnormal","planning":"abnormal","execution":"abnormal","plant":"normal"}}}'
+```
+
+### S7 正常通过
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S7","status":"reported","criteria_details":{"visual_check_flag":1},"evidence_summary":"视觉确认插入成功。"}}'
+```
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S7","status":"reported","criteria_details":{"visual_check_flag":0},"anomaly_state":{"data_commun":"normal","perception":"abnormal","planning":"abnormal","execution":"abnormal","plant":"abnormal"}}}'
+
+### S8 正常通过
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S8","status":"reported","criteria_details":{"arm_reset_flag":1,"return_position_error_m":0.03},"evidence_summary":"机械臂复位，返程误差0.03m。"}}'
+```
+Arm_reset_flag
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S8","status":"reported","criteria_details":{"arm_reset_flag":0,"return_position_error_m":0.03},"anomaly_state":{"data_commun":"abnormal","perception":"abnormal","planning":"abnormal","execution":"abnormal","plant":"abnormal"}}}'
+
+return_position_error_m
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S8","status":"reported","criteria_details":{"arm_reset_flag":1,"return_position_error_m":0.3},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"abnormal","plant":"abnormal"}}}'
+---
+
+## 四、异常建议场景1：S4 夹取失败 + execution 异常
+
+该场景基于 README 中的 S4 夹取步骤，只是在失败上报中增加 `anomaly_state.execution=abnormal`。
+
+### 模拟失败上报
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S4","status":"reported","criteria_details":{"grasp_done_flag":0},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"abnormal","plant":"unknown"},"evidence_summary":"夹取失败，机械臂反馈超时。"}}'
+```
+
+### 查看任务级 anomaly_state
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.anomaly_state'
+```
+
+### 查看保存的异常建议
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice'
+```
+
+预期：
+
+```text
+advice_generated = true
+exception_category = 执行结构异常
+anomaly_type = execution
+matched_anomalies 中包含 execution
+primary_suggestion.text 指向机械臂、夹爪、末端执行器反馈检查
+```
+修正：
+S4：执行插入
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S4","status":"reported","criteria_details":{"grasp_done_flag":1},"evidence_summary":"夹取动作完成。"}}'
+```
+
+### 用户查询
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"现在为什么失败，应该怎么处理？"}'
+```
+
+预期：回复应说明当前 S4 夹取阶段存在执行结构异常，并建议检查机械臂关节、夹爪闭合状态和末端执行器反馈。
+
+---
+
+## 五、异常建议场景2：S4 上报不支持异常 planning，验证静默跳过
+
+该场景仍使用 S4 夹取失败，但只额外上报 `planning=abnormal`。由于 S4 的 `supported_anomalies` 不包含 `planning`，系统不应把它作为用户可见建议输出。
+
+> 注意：如果刚刚已经执行过场景1，当前 S4 可能已经被 anomaly_handler 重试为 `in_progress`。如果状态不是 S4 可上报状态，请按原 README 的恢复/重试流程处理后再测。
+
+### 模拟失败上报
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S4","status":"reported","criteria_details":{"grasp_done_flag":0},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"abnormal","execution":"normal","plant":"unknown"},"evidence_summary":"夹取失败，但只上报了 S4 不支持的 planning 异常。"}}'
+```
+
+### 查看保存的异常建议
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice'
+```
+
+预期：
+
+```text
+advice_generated = false
+matched_anomalies = []
+不会输出 unsupported_anomaly / unsupported_subtask / planning 不支持 等内部原因
+```
+
+### 用户查询
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"当前卡在哪里，怎么处理？"}'
+```
+
+预期：回复不应说 `planning` 在 S4 不支持；如果没有有效 anomaly advice，应回退到原有判据失败策略，围绕 `grasp_done_flag` 的执行失败进行说明。
+
+---
+
+## 六、S2 感知/定位异常测试
+
+如果要测试 S2，请从新任务或重置后的任务开始，先完成 S1，然后在 S2 上报失败并加入 `anomaly_state.perception=abnormal`。
+
+### S1 正常通过
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.05,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1,"plug_stable_flag":1},"evidence_summary":"S1 正常通过。"}}'
+```
+
+### S2 位姿估计失败，并携带 perception 异常
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.02,"plug_pose_delta_m":0.006,"slot_stable_flag":0,"plug_stable_flag":1},"anomaly_state":{"data_commun":"normal","perception":"abnormal","planning":"normal","execution":"normal","plant":"unknown"},"evidence_summary":"插孔识别结果不稳定。"}}'
+```
+
+### 查看异常建议
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice'
+```
+
+预期：
+
+```text
+exception_category = 感知/定位异常
+anomaly_type = perception
+primary_suggestion 指向插孔/插头识别结果、位姿估计稳定性检查
+```
+
+### 用户查询
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"S2 为什么失败？下一步怎么处理？"}'
+```
+
+---
+
+## 七、S6 多异常测试：execution + plant
+
+如果要测试 S6，请先按 README 正常推进 S1 到 S5，然后在 S6 上报插入失败并加入两个 supported 异常。
+
+### S6 插入失败，并携带 execution/plant 异常
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S6","status":"reported","criteria_details":{"insert_done_flag":0},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"abnormal","plant":"abnormal"},"evidence_summary":"插入动作未完成，接触力异常。"}}'
+```
+
+### 查看匹配到的异常类型
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice.matched_anomalies[].anomaly_type'
+```
+0
+预期输出包含：
+
+```text
+execution
+plant
+```
+
+### 用户查询
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"插入失败是什么问题？"}'
+```
+修正：
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S6","status":"reported","criteria_details":{"insert_done_flag":1},"evidence_summary":"插入动作完成。"}}'
+---
+
+## 八、S8 任务阶段测试
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S8","status":"reported","criteria_details":{"arm_reset_flag":0,"return_position_error_m":0.03},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"abnormal","plant":"normal"},"evidence_summary":"机械臂复位，返程误差0.03m。"}}'
+
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S8","status":"reported","criteria_details":{"arm_reset_flag":1,"return_position_error_m":0.03},"evidence_summary":"机械臂复位，返程误差0.03m。"}}'
+
+## 九、无 anomaly_state 的兜底测试
+
+该场景使用原 README 中的失败上报方式，不加入 `anomaly_state`，用于确认原有 `_build_structured_failure_advice` 仍可作为兜底。
+
+### S3 IK 失败，但不携带 anomaly_state
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S3","status":"reported","criteria_details":{"ik_valid_flag":0},"evidence_summary":"IK 无解，但未提供 anomaly_state。"}}'
+```
+
+### 用户查询
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"当前为什么卡住？"}'
+```
+
+预期：如果没有有效 `latest_anomaly_advice`，系统应回退到原有判据失败策略，围绕 `ik_valid_flag` 的 Planning Failure 给出兜底建议。
+
+---
+
+
+
+
+## 十、结构化异常建议与回复约束测试
+
+本节用于验证当前异常建议模块调整后的关键行为：
+
+1. `latest_anomaly_advice` 中应包含 `failure_observation`、`anomaly_evidence`、`selected_fault_modules`。
+2. 失败原因应先锚定未满足判据，不把“判据失败”直接说成“内部异常”。
+3. 异常说明应基于 `anomaly_state` 和匹配到的异常画像，不能凭空扩展故障模块。
+4. QueryResponder 回答时只引用 `selected_fault_modules` 中已有模块，不重新选择或补充其他模块。
+5. 用户没有明确询问技术细节时，不主动输出判据 key、阈值、实际值等内部字段。
+
+### 场景 A：S2 失败 + perception 异常，验证失败与异常分层
+
+先确保任务已推进到 S2，然后上报 S2 位姿/稳定性失败，并携带 `perception=abnormal`。
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.02,"plug_pose_delta_m":0.006,"slot_stable_flag":0,"plug_stable_flag":1},"anomaly_state":{"data_commun":"abnormal","perception":"abnormal","planning":"abnormal","execution":"abnormal","plant":"unknown"},"evidence_summary":"插孔识别结果不稳定。"}}'
+```
+
+查看结构化异常建议：
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice | {failure_observation, anomaly_evidence, selected_fault_modules, advice_text}'
+```
+
+预期：
+
+```text
+failure_observation.summary 能说明当前失败点来自 S2 未满足完成条件。
+anomaly_evidence.status 不应为 none。
+anomaly_evidence.basis 中应能看到 perception 异常依据。
+selected_fault_modules 中应优先出现感知/定位相关系统。
+advice_text 应按“当前失败点 / 异常关注点 / 处理建议”组织。
+advice_text 不应出现“异常建议模块已匹配到”“已经检测到高严重度异常”等机械或确定性话术。
+```
+
+### 场景 B：查询失败原因，验证 QueryResponder 不重新选择模块
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"S2 为什么失败？现在应该检查哪里？"}'
+```
+
+预期：
+
+```text
+回复先说明 S2 当前失败点，再说明该失败点可能指向感知/定位环节。
+回复应使用 latest_anomaly_advice.selected_fault_modules 中已有模块。
+回复不应额外扩展到规划、执行、通信等未被 selected_fault_modules 选中的模块。
+回复不应主动输出 slot_pose_delta_m、slot_stable_flag、阈值、实际值等技术细节，除非用户明确询问。
+```
+
+### 场景 C：明确询问技术细节，验证判据字段可按需展开
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"具体是哪条判据不满足？实际值和阈值是什么？"}'
+```
+
+预期：
+
+```text
+回复可以展开未满足判据 key、实际值、期望值或阈值。
+回复仍应区分“判据不满足导致任务失败”和“perception 异常提示可能存在感知/定位问题”。
+回复不应把判据字段本身说成已经确认的内部故障。
+```
+
+### 场景 D：无有效 anomaly_state，验证不能强行诊断内部异常
+
+该场景用于确认没有异常证据时，系统只解释失败现象和处理建议，不强行说存在内部机器异常。
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S3","status":"reported","criteria_details":{"ik_valid_flag":0},"anomaly_state":{"data_commun":"normal","perception":"normal","planning":"normal","execution":"normal","plant":"normal"},"evidence_summary":"IK 求解未通过。"}}'
+```
+
+查看结构化异常建议：
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice | {failure_observation, anomaly_evidence, selected_fault_modules, advice_generated}'
+```
+
+预期：
+
+```text
+failure_observation 应说明 S3 判据未满足。
+anomaly_evidence.status 应为 none 或等价的无异常证据状态。
+selected_fault_modules 应为空或不输出新的故障模块。
+用户查询时，应说明当前是 IK/规划完成条件未满足，不能说已经存在内部异常。
+```
+
+用户查询：
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"这是不是机器人内部异常？"}'
+```
+
+预期：
+
+```text
+回复应保守说明：当前能确认的是 S3 规划/IK 相关完成条件未满足，暂时没有足够异常证据确认内部机器异常。
+```
+
+---
+
+## 十一、快速检查命令
+
+查看任务级异常状态：
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.anomaly_state'
+```
+
+查看最近一次异常上下文：
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_context'
+```
+
+查看最近一次异常建议：
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice'
+```
+
+查看匹配到的异常类型：
+
+```bash
+curl --noproxy '*' -s http://localhost:8889/api/task/TI2026021192/status | jq '.latest_anomaly_advice.matched_anomalies[].anomaly_type'
+```
+
+---
+
+## 十二、注意事项
+
+1. 本文档是 `README.md` 的异常建议补充测试，不是独立任务测试集。
+2. 如果要重复测试同一个阶段，可能需要按原 README 的重试、回退或重置方式恢复任务状态。
+3. 除了加入 `anomaly_state`，其余 `task_id`、接口格式、判据字段尽量保持和 README 一致。
+4. `anomaly_state` 建议后端每次全量上报当前异常快照，避免旧异常残留。
+5. 如果上报了当前阶段不支持的异常，系统应静默跳过，不在用户回复中输出 unsupported 信息。

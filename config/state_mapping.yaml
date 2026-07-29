@@ -1,0 +1,17 @@
+# 状态上报字段到内部判据字段的映射
+mappings:
+  distance_error_m: "distance_error_max"
+  angle_error_deg: "angle_error_max"
+  speed_stable_frames: "speed_stable_frames"
+  grid_count: "min_grid_count"
+  panel_visible_flag: "panel_visible_flag"
+  slot_pose_delta_m: "slot_pose_delta_max"
+  plug_pose_delta_m: "plug_pose_delta_max"
+  slot_stable_flag: "slot_stable_flag"
+  plug_stable_flag: "plug_stable_flag"
+  ik_valid_flag: "ik_valid_flag"
+  grasp_done_flag: "grasp_done_flag"
+  insert_done_flag: "insert_done_flag"
+  visual_check_flag: "visual_check_flag"
+  arm_reset_flag: "arm_reset_flag"
+  return_position_error_m: "return_position_error_max"

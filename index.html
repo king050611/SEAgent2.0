@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskMonitor - 水下任务流程监管</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #0a0c12;
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            color: #eef2ff;
+            height: 100vh;
+            overflow: hidden;
+        }
+        .app {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        .header {
+            padding: 1rem 2rem;
+            border-bottom: 1px solid #1e2432;
+            background: #0f1119;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .header h1 { font-size: 1.5rem; font-weight: 500; }
+        .main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            gap: 0;
+        }
+        .task-list {
+            width: 280px;
+            background: #0b0e16;
+            border-right: 1px solid #1e2432;
+            overflow-y: auto;
+        }
+        .chat-area {
+            flex: 3;
+            display: flex;
+            flex-direction: column;
+            background: #0b0e16;
+            min-width: 400px;
+        }
+        .subtask-detail {
+            width: 340px;
+            background: #0b0e16;
+            border-left: 1px solid #1e2432;
+            overflow-y: auto;
+            padding: 1rem;
+        }
+        @media (max-width: 1000px) {
+            .subtask-detail { display: none; }
+        }
+        .task-list-header, .chat-header, .subtask-header {
+            padding: 1rem;
+            font-weight: 600;
+            border-bottom: 1px solid #1e2432;
+        }
+        .task-item {
+            padding: 0.8rem 1rem;
+            border-bottom: 1px solid #1a1f2e;
+            cursor: pointer;
+            transition: background 0.1s;
+        }
+        .task-item:hover { background: #151b28; }
+        .task-item.active { background: #1e2a3a; border-left: 3px solid #4f7aff; }
+        .task-title {
+            font-weight: 500;
+            display: flex;
+            justify-content: space-between;
+        }
+        .task-status {
+            font-size: 0.7rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 1rem;
+            background: #1e2432;
+        }
+        .messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0.8rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.6rem;
+        }
+        .message {
+            display: flex;
+            gap: 0.5rem;
+            max-width: 85%;
+        }
+        .message.user { align-self: flex-end; flex-direction: row-reverse; }
+        .message.bot { align-self: flex-start; }
+        .bubble {
+            background: #1a1f2e;
+            padding: 0.5rem 1rem;
+            border-radius: 1.2rem;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            white-space: pre-wrap;   /* 新增：保留换行符 */
+        }
+        .user .bubble { background: #2d4ed8; color: white; }
+        .avatar {
+            width: 28px; height: 28px;
+            background: #252c3c;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 0.9rem;
+        }
+        .input-area {
+            padding: 0.8rem;
+            border-top: 1px solid #1e2432;
+            display: flex;
+            gap: 0.5rem;
+        }
+        .input-area input {
+            flex: 1;
+            background: #11141f;
+            border: 1px solid #2a3142;
+            border-radius: 2rem;
+            padding: 0.5rem 1rem;
+            color: white;
+            font-size: 0.8rem;
+            outline: none;
+        }
+        .input-area button {
+            background: #4f7aff;
+            border: none;
+            border-radius: 2rem;
+            padding: 0 1rem;
+            color: white;
+            cursor: pointer;
+        }
+        .subtask-card {
+            background: #11151f;
+            border-radius: 1rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-left: 4px solid;
+            transition: all 0.1s ease;
+        }
+        .subtask-card.pending { border-left-color: #6c757d; }
+        .subtask-card.in_progress { border-left-color: #0d6efd; }
+        .subtask-card.waiting_approval { border-left-color: #ffc107; }
+        .subtask-card.completed { border-left-color: #198754; }
+        .subtask-card.failed { border-left-color: #dc3545; }
+        .subtask-title {
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 0.5rem;
+        }
+        .criteria-detail {
+            font-size: 0.75rem;
+            color: #a0abbd;
+            margin-top: 0.5rem;
+            word-break: break-word;
+        }
+        .approve-btn {
+            background: #a855f7;
+            border: none;
+            color: white;
+            padding: 0.3rem 1rem;
+            border-radius: 1rem;
+            font-size: 0.7rem;
+            cursor: pointer;
+            margin-top: 0.5rem;
+        }
+        .green { color: #22c55e; }
+        .red { color: #ef4444; }
+        .retry-badge {
+            background: #ff8c00;
+            color: #000;
+            font-size: 0.6rem;
+            padding: 0.1rem 0.4rem;
+            border-radius: 1rem;
+            margin-left: 0.5rem;
+        }
+        .mode-toggle {
+            background: #2d4ed8;
+            border: none;
+            border-radius: 2rem;
+            padding: 0.3rem 1rem;
+            color: white;
+            font-size: 0.75rem;
+            cursor: pointer;
+            transition: background 0.2s;
+            margin-left: 1rem;
+        }
+        .mode-toggle.global {
+            background: #a855f7;
+        }
+        .refresh-btn {
+            background: #2d4ed8;
+            border: none;
+            color: white;
+            padding: 0.2rem 0.8rem;
+            border-radius: 1rem;
+            cursor: pointer;
+            font-size: 0.7rem;
+        }
+        .waiting-approval-notice {
+            font-size: 0.7rem;
+            color: #ffc107;
+            margin-left: 0.5rem;
+        }
+    </style>
+</head>
+<body>
+<div class="app">
+    <div class="header">
+        <h1>🔧 TaskMonitor · 水下任务流程监管</h1>
+        <div id="globalProgress">未选择任务</div>
+    </div>
+    <div class="main">
+        <!-- 左侧任务列表 -->
+        <div class="task-list">
+            <div class="task-list-header">
+                <span>📋 任务列表</span>
+                <button id="refreshTaskListBtn" class="refresh-btn">🔄 刷新</button>
+            </div>
+            <div id="taskListContainer">加载中...</div>
+        </div>
+
+        <!-- 中间聊天区 -->
+        <div class="chat-area">
+            <div class="chat-header">
+                <span>💬 任务助手</span>
+                <button id="globalModeToggle" class="mode-toggle">🌐 全局模式</button>
+            </div>
+            <div class="messages" id="messages"></div>
+            <div class="input-area">
+                <input type="text" id="queryInput" placeholder="查询进度或输入干预指令，例如：“当前卡在哪？” “回退到S2”">
+                <button id="sendQueryBtn">发送</button>
+            </div>
+        </div>
+
+        <!-- 右侧子任务详情 -->
+        <div class="subtask-detail">
+            <div style="padding: 1rem; border-bottom: 1px solid #1e2432; font-weight: 600;">📋 子任务详情</div>
+            <div id="subtaskDetailContainer" style="margin-top: 1rem;">请选择任务</div>
+        </div>
+    </div>
+</div>
+
+<script>
+    let currentTaskId = null;
+    let pollInterval = null;
+    let taskListPollInterval = null;
+    let globalMode = false;
+    let uiAutoRefreshEnabled = true;
+    let currentWaitingSubtask = null;
+    const SUBTASK_ORDER = ["S1","S2","S3","S4","S5","S6","S7","S8"];
+
+    async function fetchTaskList() {
+        const res = await fetch("/api/tasks");
+        if (!res.ok) return [];
+        return await res.json();
+    }
+
+    async function scanTasks(silent = true) {
+        const res = await fetch("/api/task/scan", { method: "POST" });
+        if (!res.ok) return [];
+        const data = await res.json();
+        const results = data.results || [];
+        if (!silent) {
+            const created = results.filter(x => x.status === "created").length;
+            const errors = results.filter(x => x.status === "error" || x.status === "failed").length;
+            if (created > 0 || errors > 0) {
+                addMessage("bot", `扫描完成：新增 ${created} 个任务，异常 ${errors} 个。`);
+            } else {
+                addMessage("bot", "扫描完成，暂无新增任务。");
+            }
+        }
+        return results;
+    }
+
+    async function renderTaskList() {
+        const tasks = await fetchTaskList();
+        const container = document.getElementById("taskListContainer");
+        if (!tasks.length) {
+            container.innerHTML = '<div style="padding: 1rem; color:#8b93b0;">暂无任务，请将任务JSON文件放入 ./task 文件夹</div>';
+            return;
+        }
+        let html = "";
+        for (const task of tasks) {
+            const status = task.overall_status || "unknown";
+            let statusText = "";
+            if (status === "in_progress") statusText = "执行中";
+            else if (status === "completed") statusText = "已完成";
+            else if (status === "failed") statusText = "失败";
+            else statusText = status;
+            const activeClass = (currentTaskId === task.task_id) ? "active" : "";
+            html += `
+                <div class="task-item ${activeClass}" data-task-id="${task.task_id}">
+                    <div class="task-title">
+                        <span>${escapeHtml(task.task_id)}</span>
+                        <span class="task-status">${statusText}</span>
+                    </div>
+                    <div class="task-desc" style="font-size:0.7rem;">${escapeHtml(task.description || "无描述")}</div>
+                </div>
+            `;
+        }
+        container.innerHTML = html;
+        document.querySelectorAll(".task-item").forEach(el => {
+            el.addEventListener("click", () => {
+                const taskId = el.getAttribute("data-task-id");
+                selectTask(taskId);
+            });
+        });
+    }
+
+    async function selectTask(taskId) {
+        if (currentTaskId === taskId) return;
+        currentTaskId = taskId;
+        if (pollInterval) clearInterval(pollInterval);
+        uiAutoRefreshEnabled = true;
+        currentWaitingSubtask = null;
+        await refreshAllData(true);
+        startPolling(taskId);
+    }
+
+    async function fetchTaskStatus(taskId) {
+        const res = await fetch(`/api/task/${taskId}/status`);
+        if (!res.ok) return null;
+        return await res.json();
+    }
+
+    async function refreshAllData(forceRefreshUI = false) {
+        if (!currentTaskId) return;
+        const status = await fetchTaskStatus(currentTaskId);
+        if (status) {
+            if (status.notifications && Array.isArray(status.notifications)) {
+                const unread = status.notifications.filter(n => n.read === false);
+                if (unread.length > 0) {
+                    for (const notif of unread) {
+                        addMessage("bot", notif.content);
+                    }
+                    try {
+                        await fetch(`/api/task/${currentTaskId}/notifications/clear`, { method: "POST" });
+                    } catch (e) {
+                        console.warn("清除通知失败", e);
+                    }
+                }
+            }
+
+            const hasWaitingApproval = status.subtasks.some(st => st.status === "waiting_approval" && st.subtask_id === status.current_subtask);
+            const waitingId = hasWaitingApproval ? status.current_subtask : null;
+
+            updateGlobalProgress(status);
+
+            if (forceRefreshUI) {
+                renderSubtaskDetail(status);
+                uiAutoRefreshEnabled = true;
+                currentWaitingSubtask = null;
+            } else if (hasWaitingApproval) {
+                if (uiAutoRefreshEnabled) {
+                    uiAutoRefreshEnabled = false;
+                    currentWaitingSubtask = waitingId;
+                    const container = document.getElementById("subtaskDetailContainer");
+                    if (container.innerHTML === "" || container.innerHTML === "请选择任务") {
+                        renderSubtaskDetail(status);
+                    } else {
+                        const notice = document.querySelector(".waiting-approval-notice");
+                        if (!notice) {
+                            const header = document.querySelector(".subtask-detail > div:first-child");
+                            if (header && !header.querySelector(".waiting-approval-notice")) {
+                                const badge = document.createElement("span");
+                                badge.className = "waiting-approval-notice";
+                                badge.innerText = "⏳ 等待审核，自动刷新已暂停";
+                                header.appendChild(badge);
+                            }
+                        }
+                    }
+                }
+            } else {
+                if (!uiAutoRefreshEnabled) {
+                    uiAutoRefreshEnabled = true;
+                    currentWaitingSubtask = null;
+                    renderSubtaskDetail(status);
+                    const badge = document.querySelector(".waiting-approval-notice");
+                    if (badge) badge.remove();
+                } else {
+                    renderSubtaskDetail(status);
+                }
+            }
+        } else {
+            document.getElementById("subtaskDetailContainer").innerHTML = '<div>无法加载任务详情</div>';
+        }
+    }
+
+    function renderSubtaskDetail(taskState) {
+        const container = document.getElementById("subtaskDetailContainer");
+        if (!taskState || !taskState.subtasks) {
+            container.innerHTML = "<div>无子任务数据</div>";
+            return;
+        }
+        let html = "";
+        for (const id of SUBTASK_ORDER) {
+            const st = taskState.subtasks.find(s => s.subtask_id === id);
+            if (!st) continue;
+            const status = st.status;
+            let statusText = "";
+            switch(status) {
+                case "pending": statusText = "⏳ 等待"; break;
+                case "in_progress": statusText = "▶ 执行中"; break;
+                case "completed": statusText = "✅ 完成"; break;
+                case "failed": statusText = "❌ 失败"; break;
+                case "waiting_approval": statusText = "🟣 待审核"; break;
+                default: statusText = status;
+            }
+            const retryBadge = st.retry_count > 0 ? `<span class="retry-badge">重试 ${st.retry_count}</span>` : "";
+            const criteria = st.completion_criteria || {};
+            const hardMet = criteria.hard_met ? '✅ 满足' : '❌ 不满足';
+            const softMet = criteria.soft_met ? '✅ 满足' : '❌ 不满足';
+            const hardUnmet = (criteria.hard_unmet_details || []).join(", ");
+            const softUnmet = (criteria.soft_unmet_details || []).join(", ");
+            const evidence = st.evidence_summary ? `<div class="criteria-detail"><em>📋 ${escapeHtml(st.evidence_summary)}</em></div>` : "";
+            let approveBtn = "";
+            // ############# approval 状态语义区分开始 #############
+            const isCurrentWaiting = status === "waiting_approval" && taskState.current_subtask === id;
+            if (isCurrentWaiting && criteria.all_met === true) {
+                approveBtn = `<button class="approve-btn" data-subtask="${id}" data-task="${taskState.task_id}">✔ 人工通过</button>`;
+            } else if (isCurrentWaiting) {
+                approveBtn = `<div class="criteria-detail red">⚠ 需人工介入处理，请先重试或回退后重新上报数据。</div>`;
+            }
+            // ############# approval 状态语义区分结束 #############
+            html += `
+                <div class="subtask-card ${status}">
+                    <div class="subtask-title">
+                        <span>${id} · ${st.name} ${retryBadge}</span>
+                        <span>${statusText}</span>
+                    </div>
+                    <div class="criteria-detail">
+                        <div>硬判据: ${hardMet} ${hardUnmet ? `(未满足: ${hardUnmet})` : ""}</div>
+                        <div>软判据: ${softMet} ${softUnmet ? `(未满足: ${softUnmet})` : ""}</div>
+                        ${evidence}
+                    </div>
+                    ${approveBtn}
+                </div>
+            `;
+        }
+        container.innerHTML = html;
+        document.querySelectorAll(".approve-btn").forEach(btn => {
+            btn.addEventListener("click", async (e) => {
+                e.stopPropagation();
+                const taskId = btn.getAttribute("data-task");
+                const subId = btn.getAttribute("data-subtask");
+                const res = await fetch(`/api/task/${taskId}/subtask/${subId}/approve`, { method: "POST" });
+                const data = await res.json();
+                const approvalSucceeded = res.ok && (
+                    data.ok ||
+                    data.action === "advance" ||
+                    data.action === "task_completed"
+                );
+                if (approvalSucceeded) {
+                    const message = data.action === "task_completed"
+                        ? `✅ 子任务 ${subId} 已人工通过，任务已完成。`
+                        : `✅ 子任务 ${subId} 已人工通过，继续推进。`;
+                    addMessage("bot", message);
+                    await refreshAllData(true);
+                    uiAutoRefreshEnabled = true;
+                    currentWaitingSubtask = null;
+                    const badge = document.querySelector(".waiting-approval-notice");
+                    if (badge) badge.remove();
+                } else {
+                    addMessage("bot", `❌ 审核失败: ${data.message || data.error || "未知错误"}`);
+                }
+            });
+        });
+    }
+
+    function updateGlobalProgress(taskState) {
+        if (!taskState || !taskState.subtasks) {
+            document.getElementById("globalProgress").innerText = "未选择任务";
+            return;
+        }
+        const completed = taskState.subtasks.filter(s => s.status === "completed").length;
+        const total = taskState.subtasks.length;
+        const percent = Math.round((completed / total) * 100);
+        document.getElementById("globalProgress").innerHTML = `任务: ${taskState.task_id} | 进度: ${percent}% (${completed}/${total})`;
+    }
+
+    function startPolling(taskId) {
+        if (pollInterval) clearInterval(pollInterval);
+        pollInterval = setInterval(async () => {
+            if (!taskId || taskId !== currentTaskId) return;
+            await refreshAllData(false);
+        }, 3000);
+    }
+
+    async function sendMessage(message) {
+        if (!globalMode && !currentTaskId) {
+            addMessage("bot", "⚠️ 请先在左侧选择一个任务，或开启全局模式。");
+            return;
+        }
+        addMessage("user", message);
+        const body = { message: message, global_mode: globalMode };
+        if (!globalMode && currentTaskId) body.task_id = currentTaskId;
+        const res = await fetch("/api/query", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+        const data = await res.json();
+        if (!res.ok) {
+            addMessage("bot", data.answer || `❌ 请求失败: ${data.message || data.error}`);
+            return;
+        }
+        addMessage("bot", data.answer || "请求已处理。");
+        if (data.refresh_required === true) {
+            await refreshAllData(true);
+            uiAutoRefreshEnabled = true;
+            currentWaitingSubtask = null;
+            const badge = document.querySelector(".waiting-approval-notice");
+            if (badge) badge.remove();
+        }
+    }
+
+    // 修复点：正则改为 /\n/g，并增加 white-space: pre-wrap 样式
+    function addMessage(role, content) {
+        const container = document.getElementById("messages");
+        const div = document.createElement("div");
+        div.className = `message ${role}`;
+        const avatar = role === "user" ? "👤" : "🤖";
+        // 使用 /\n/g 匹配真正的换行符
+        div.innerHTML = `<div class="avatar">${avatar}</div><div class="bubble">${escapeHtml(content).replace(/\n/g,'<br>')}</div>`;
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+        while (container.children.length > 50) container.removeChild(container.firstChild);
+    }
+
+    function escapeHtml(str) {
+        if (!str) return "";
+        return str.replace(/[&<>]/g, function(m) {
+            if (m === "&") return "&amp;";
+            if (m === "<") return "&lt;";
+            if (m === ">") return "&gt;";
+            return m;
+        });
+    }
+
+    async function refreshAll(scanFirst = false) {
+        if (scanFirst) await scanTasks(true);
+        await renderTaskList();
+        if (currentTaskId) {
+            await refreshAllData(true);
+        } else {
+            const tasks = await fetchTaskList();
+            if (tasks.length > 0) await selectTask(tasks[0].task_id);
+        }
+    }
+
+    function startTaskListPolling() {
+        if (taskListPollInterval) clearInterval(taskListPollInterval);
+        taskListPollInterval = setInterval(async () => {
+            await refreshAll();
+            const tasks = await fetchTaskList();
+            const exists = tasks.some(t => t.task_id === currentTaskId);
+            if (currentTaskId && !exists) {
+                currentTaskId = null;
+                document.getElementById("subtaskDetailContainer").innerHTML = "<div>请选择任务</div>";
+                if (pollInterval) clearInterval(pollInterval);
+                document.getElementById("globalProgress").innerText = "未选择任务";
+                uiAutoRefreshEnabled = true;
+                currentWaitingSubtask = null;
+            }
+        }, 30000);
+    }
+
+    function updateModeButton() {
+        const modeToggleBtn = document.getElementById("globalModeToggle");
+        if (globalMode) {
+            modeToggleBtn.textContent = "🌐 全局模式";
+            modeToggleBtn.classList.add("global");
+        } else {
+            modeToggleBtn.textContent = "🔒 局部模式";
+            modeToggleBtn.classList.remove("global");
+        }
+    }
+
+    const modeToggleBtn = document.getElementById("globalModeToggle");
+    modeToggleBtn.addEventListener("click", () => {
+        globalMode = !globalMode;
+        updateModeButton();
+        addMessage("bot", globalMode ? "✅ 已开启全局模式。请在消息中明确指定任务 ID。" : "🔒 已关闭全局模式，仅关注当前选中的任务。");
+    });
+    updateModeButton();
+
+    document.getElementById("refreshTaskListBtn").addEventListener("click", async () => {
+        await scanTasks(false);
+        await refreshAll();
+    });
+    document.getElementById("sendQueryBtn").addEventListener("click", () => {
+        const input = document.getElementById("queryInput");
+        const msg = input.value.trim();
+        if (!msg) return;
+        sendMessage(msg);
+        input.value = "";
+    });
+    document.getElementById("queryInput").addEventListener("keypress", (e) => {
+        if (e.key === "Enter") document.getElementById("sendQueryBtn").click();
+    });
+
+    async function init() {
+        await refreshAll(true);
+        startTaskListPolling();
+        const tasks = await fetchTaskList();
+        if (tasks.length > 0) await selectTask(tasks[0].task_id);
+        else addMessage("bot", "📭 当前没有任务。请将任务JSON文件放入 ./task 文件夹。");
+    }
+    init();
+</script>
+</body>
+</html>

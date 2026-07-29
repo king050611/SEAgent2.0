@@ -1,0 +1,70 @@
+{
+  "intent_id": "TI2026021192",
+  "task_type": "valve_operation",
+  "priority": 0,
+  "time": {
+    "start": "2026-05-29T21:59:21+08:00",
+    "end": null
+  },
+  "location": {
+    "oilfield": null,
+    "water_depth_m": 200.0
+  },
+  "task": {
+    "type": "valve_operation",
+    "details": {
+      "wellhead_id": null,
+      "target": {
+        "latitude": 20.0,
+        "longitude": 30.0
+      },
+      "christmas_tree_type": "vertical",
+      "hole_positions": []
+    }
+  },
+  "equipment": {
+    "robot_type": "work_class_rov",
+    "payload": [],
+    "support_vessel": {
+      "name": null,
+      "latitude": null,
+      "longitude": null
+    }
+  },
+  "conditions": {},
+  "monitoring_runtime_example": {
+    "current_stage": "S2",
+    "pending_human_review": true,
+    "last_evaluation": {
+      "subtask_id": "S2",
+      "passed": false,
+      "primary_failure_type": "perception_failure",
+      "primary_failure_type_name": "感知失败",
+      "failed_criteria_names": [
+        "slot_pose_stable_flag",
+        "plug_pose_stable_flag"
+      ],
+      "explanation": "当前阶段 S2 模型评估未通过，插孔与插头位置估计稳定性不足，建议等待多帧稳定、调整视角并重新触发感知识别流程。",
+      "suggestions": [
+        "增强观测信息质量，等待多帧稳定",
+        "调整传感器视角或观测位置",
+        "重新触发感知识别流程"
+      ]
+    },
+    "explanation": "当前阶段 S2 模型评估未通过，插孔与插头位置估计稳定性不足。",
+    "failed_criteria": [
+      {
+        "name": "slot_pose_stable_flag",
+        "actual": 0,
+        "expected": 1,
+        "operator": "=="
+      },
+      {
+        "name": "plug_pose_stable_flag",
+        "actual": 0,
+        "expected": 1,
+        "operator": "=="
+      }
+    ]
+  }
+}
