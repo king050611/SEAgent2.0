@@ -10,7 +10,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 
-def create_app(task_manager, query_responder, state_monitor, state_store, task_scanner=None):
+def create_app(task_manager, query_responder, intent_router, state_monitor, state_store, task_scanner=None):
     # 设置模板文件夹为项目根目录（与 run.py 同级）
     app = Flask(__name__, template_folder=str(Path(__file__).parent.parent))
 
@@ -122,7 +122,7 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
 
     @app.route("/api/query", methods=["POST"])
     def query_task():
-        """Handle queries, pending intervention confirmation, and new interventions."""
+        """Route each message once, then orchestrate query or control handling."""
         try:
             data = _json_body()
             if not data:
@@ -134,40 +134,99 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
             if not user_message:
                 return jsonify({"error": "message required"}), 400
 
+            all_tasks = state_store.list_tasks()
+            available_tasks = [
+                {
+                    "task_id": tid,
+                    "description": state.get("description"),
+                    "overall_status": state.get("overall_status"),
+                    "current_subtask": state.get("current_subtask"),
+                    "pending_intervention": state.get("pending_intervention"),
+                    "subtasks": [
+                        {
+                            "id": subtask.get("subtask_id"),
+                            "name": subtask.get("name"),
+                            "status": subtask.get("status"),
+                        }
+                        for subtask in state.get("subtasks", [])
+                    ],
+                }
+                for tid, state in all_tasks.items()
+            ]
+
             if global_mode:
-                all_tasks_state = []
-                all_tasks = state_store.list_tasks()
-                for tid, tstate in all_tasks.items():
-                    all_tasks_state.append({
-                        "task_id": tid,
-                        "description": tstate.get("description"),
-                        "overall_status": tstate.get("overall_status"),
-                        "current_subtask": tstate.get("current_subtask"),
-                        "subtasks": [
-                            {"id": st["subtask_id"], "name": st["name"], "status": st["status"]}
-                            for st in tstate.get("subtasks", [])
-                        ]
+                task_state = None
+                pending = None
+            else:
+                if not task_id:
+                    return jsonify({"error": "task_id required when global_mode is false"}), 400
+                task_state = task_manager.get_task_status(task_id)
+                if not task_state:
+                    return jsonify({"error": "task not found"}), 404
+                pending = task_manager.get_pending_intervention(task_state)
+
+            route = intent_router.route(
+                user_message=user_message,
+                task_state=task_state,
+                pending_intervention=pending,
+                global_mode=global_mode,
+                available_tasks=available_tasks,
+            )
+
+            target_task_id = route.get("target_task_id") if global_mode else task_id
+            if global_mode and target_task_id:
+                task_state = task_manager.get_task_status(target_task_id)
+                pending = task_manager.get_pending_intervention(task_state) if task_state else None
+
+            if route.get("intent") == "query":
+                if route.get("query_scope") == "irrelevant":
+                    answer = query_responder.answer_irrelevant(user_message, task_state)
+                    return jsonify({"type": "irrelevant", "answer": answer, "refresh_required": False})
+
+                if route.get("needs_clarification"):
+                    answer = query_responder.answer_query_clarification(
+                        user_message,
+                        task_state,
+                        route.get("reason"),
+                    )
+                    return jsonify({"type": "query", "answer": answer, "refresh_required": False})
+
+                if global_mode and (route.get("query_scope") == "global" or not target_task_id):
+                    answer = query_responder.answer_global_query(user_message, available_tasks)
+                    return jsonify({"type": "query", "answer": answer, "refresh_required": False})
+
+                if not task_state:
+                    answer = query_responder.answer_global_query(user_message, available_tasks)
+                    return jsonify({"type": "query", "answer": answer, "refresh_required": False})
+
+                answer = query_responder.answer_query(user_message, task_state, pending)
+                return jsonify({"type": "query", "answer": answer, "refresh_required": False})
+
+            if route.get("confirm_stage") == "decision":
+                if not task_state or not pending:
+                    clarification_state = task_state or {
+                        "task_id": target_task_id,
+                        "overall_status": "unknown",
+                        "current_subtask": None,
+                        "subtasks": [],
+                    }
+                    answer = query_responder.answer_control_clarification(
+                        user_message,
+                        clarification_state,
+                        "当前没有待确认的流程控制动作",
+                    )
+                    return jsonify({
+                        "type": "intervention_pending",
+                        "answer": answer,
+                        "pending_action": None,
+                        "refresh_required": False,
                     })
-                result = query_responder.process_global(user_message, all_tasks_state, task_manager)
-                return jsonify(result)
 
-            if not task_id:
-                return jsonify({"error": "task_id required when global_mode is false"}), 400
-
-            task_state = task_manager.get_task_status(task_id)
-            if not task_state:
-                return jsonify({"error": "task not found"}), 404
-
-            pending = task_manager.get_pending_intervention(task_state)
-            if pending:
-                decision_info = query_responder.classify_confirmation(user_message, pending, task_state)
-                decision = decision_info.get("decision")
-
-                if decision == "confirm":
-                    task_manager.clear_pending_intervention(task_id)
+                if route.get("decision") == "confirm":
+                    task_manager.clear_pending_intervention(target_task_id)
                     action = pending.get("action") or {}
-                    intervention_result = task_manager.execute_intervention(task_id, action)
-                    latest_state = task_manager.get_task_status(task_id) or task_state
+                    intervention_result = task_manager.execute_intervention(target_task_id, action)
+                    latest_state = task_manager.get_task_status(target_task_id) or task_state
                     answer = query_responder.generate_intervention_response(
                         user_message=pending.get("user_message") or user_message,
                         intervention_result={
@@ -184,9 +243,9 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                         "refresh_required": True,
                     })
 
-                if decision == "cancel":
-                    clear_result = task_manager.clear_pending_intervention(task_id)
-                    latest_state = task_manager.get_task_status(task_id) or task_state
+                if route.get("decision") == "cancel":
+                    clear_result = task_manager.clear_pending_intervention(target_task_id)
+                    latest_state = task_manager.get_task_status(target_task_id) or task_state
                     answer = query_responder.generate_reply(
                         reply_intent="用户取消了待确认的流程干预。请说明没有修改任务状态，并提示可继续查询或重新发起干预",
                         user_message=user_message,
@@ -199,11 +258,10 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                         "refresh_required": False,
                     })
 
-                answer = query_responder.generate_reply(
-                    reply_intent="当前存在一个待确认的流程干预，用户本轮没有明确确认或取消。请提醒用户必须先回复“确认”或“取消”，不要执行任何修改",
-                    user_message=user_message,
-                    task_state=task_state,
-                    operation_result={"pending_intervention": pending, "confirmation_decision": decision_info},
+                answer = query_responder.answer_control_clarification(
+                    user_message,
+                    task_state,
+                    route.get("reason"),
                 )
                 return jsonify({
                     "type": "intervention_pending",
@@ -212,46 +270,56 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                     "refresh_required": False,
                 })
 
-            result = query_responder.process(user_message, task_state)
-
-            if result["type"] == "irrelevant":
-                return jsonify({"type": "irrelevant", "answer": result["answer"], "refresh_required": False})
-            if result["type"] == "query":
-                return jsonify({"type": "query", "answer": result["answer"], "refresh_required": False})
-            if result["type"] == "intervention":
-                action = result.get("action")
-                if not action:
-                    answer = query_responder.generate_reply(
-                        reply_intent="说明干预动作解析失败，请用户补充更明确的动作、参数或子任务",
-                        user_message=user_message,
-                        task_state=task_state,
-                        operation_result={"error": "missing_action"},
-                    )
-                    return jsonify({"type": "irrelevant", "answer": answer, "refresh_required": False})
-
-                pending_result = task_manager.set_pending_intervention(
-                    task_id=task_id,
-                    action=action,
+            if pending:
+                answer = query_responder.generate_reply(
+                    reply_intent=(
+                        "当前已有待确认动作。说明不能用新控制请求覆盖它，"
+                        "请用户先确认或取消原动作，再提交新的控制请求。"
+                    ),
                     user_message=user_message,
-                    raw_intent=result.get("raw_intent") or {},
+                    task_state=task_state,
+                    operation_result={
+                        "pending_action": pending.get("action") or {},
+                        "requires_user_confirmation": True,
+                    },
                 )
-                latest_state = task_manager.get_task_status(task_id) or task_state
-                answer = query_responder.generate_confirmation_request(user_message, action, latest_state)
                 return jsonify({
                     "type": "intervention_pending",
                     "answer": answer,
-                    "pending_action": action,
-                    "result": pending_result,
+                    "pending_action": pending.get("action"),
                     "refresh_required": False,
                 })
 
-            answer = query_responder.generate_reply(
-                reply_intent="说明系统暂时无法理解请求，请用户换一种方式描述任务查询或干预指令",
+            action = route.get("action")
+            if route.get("needs_clarification") or not action or not task_state:
+                clarification_state = task_state or {
+                    "task_id": target_task_id,
+                    "overall_status": "unknown",
+                    "current_subtask": None,
+                    "subtasks": [],
+                }
+                answer = query_responder.answer_control_clarification(
+                    user_message,
+                    clarification_state,
+                    route.get("reason"),
+                )
+                return jsonify({"type": "irrelevant", "answer": answer, "refresh_required": False})
+
+            pending_result = task_manager.set_pending_intervention(
+                task_id=target_task_id,
+                action=action,
                 user_message=user_message,
-                task_state=task_state,
-                operation_result={"error": "unknown_processing_type", "result": result},
+                raw_intent=route,
             )
-            return jsonify({"type": "error", "answer": answer, "refresh_required": False})
+            latest_state = task_manager.get_task_status(target_task_id) or task_state
+            answer = query_responder.generate_confirmation_request(user_message, action, latest_state)
+            return jsonify({
+                "type": "intervention_pending",
+                "answer": answer,
+                "pending_action": action,
+                "result": pending_result,
+                "refresh_required": False,
+            })
         except Exception as e:
             logger.exception("Unhandled exception in /api/query: %s", e)
             return jsonify({

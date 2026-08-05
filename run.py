@@ -32,6 +32,7 @@ from src.anomaly_handler import AnomalyHandler
 from src.anomaly_advisor import AnomalyAdvisor
 # ############# anomaly advisor 接入结束 #############
 from src.intervention_handler import InterventionHandler
+from src.IntentRouter import IntentRouter
 from src.query_responder import QueryResponder
 from src.state_monitor import StateMonitor
 from src.task_scanner import TaskScanner
@@ -245,6 +246,7 @@ def startup():
     anomaly_advisor = AnomalyAdvisor(llm_client=llm_client)
     # ############# anomaly advisor 接入结束 #############
     intervention_handler = InterventionHandler(llm_client, task_decomposer, state_store, criteria_evaluator)
+    intent_router = IntentRouter(llm_client)
     query_responder = QueryResponder(llm_client)
     state_monitor = StateMonitor(state_store, criteria_evaluator, STATE_MAPPING, query_responder)
 
@@ -288,6 +290,7 @@ def startup():
     app = create_app(
         task_manager=task_manager,
         query_responder=query_responder,
+        intent_router=intent_router,
         state_monitor=state_monitor,
         state_store=state_store,
         task_scanner=task_scanner,

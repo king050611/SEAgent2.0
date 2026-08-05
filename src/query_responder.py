@@ -1,12 +1,4 @@
-"""
-query_responder.py – 大模型统一处理用户消息。
-
-职责边界：
-- LLM 负责判断用户意图：查询、干预、无关。
-- LLM 负责判断待确认干预的确认/取消意图。
-- LLM 负责生成所有面向用户的自然语言回复。
-- 业务代码只做 JSON 容错、动作字段最小校验和执行编排。
-"""
+"""Generate user-facing replies from resolved routes and task facts."""
 
 import json
 import logging
@@ -15,250 +7,141 @@ from typing import Dict, Any, Optional, List
 
 import yaml
 from .llm_client import LLMClient
-from .prompts import CLASSIFY_PROMPT, CONFIRM_PROMPT, REPLY_SYSTEM_PROMPT
+from .prompts import REPLY_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 
 
 class QueryResponder:
-    VALID_INTENTS = {"query", "intervention", "irrelevant"}
-    VALID_ACTIONS = {"rollback", "retry", "change_parameter", "force_complete", "override_field"}
-    VALID_CONFIRM_DECISIONS = {"confirm", "cancel", "other"}
-
-    def __init__(self, llm: LLMClient, task_manager=None):
+    def __init__(self, llm: LLMClient):
         self.llm = llm
-        self.task_manager = task_manager  # 可选，用于全局模式
         # ########## 修改内容：加载 criteria.yaml 中的判据解释，用于自然语言说明未满足判据含义。 ################
         self.criteria_config = self._load_criteria_config()
         # ################
 
-    # ---------- 原有方法保持不变 ----------
-    def process(self, user_message: str, task_state: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        统一处理入口（局部模式）。
-        返回：
-        - {"type":"query", "answer": str}
-        - {"type":"intervention", "action": dict}
-        - {"type":"irrelevant", "answer": str}
-        """
-        intent_info = self._classify_intent(user_message, task_state)
-        intent = intent_info.get("intent")
-
-        if intent == "query":
-            # ############# anomaly advice 接入开始 #############
-            operation_result = self._build_query_operation_result(task_state, user_message=user_message)
-            reply_intent = (
-                "根据用户问题和本轮任务事实回答。"
-                "回答失败、卡点或处理建议时，先说明失败现象和完成条件未满足的含义；失败不等于机器人内部异常。"
-                "用户未明确询问异常或内部故障时，不主动说明异常证据状态，也不要补充否定性异常说明。"
-                "没有有效异常建议时，不得断言存在内部异常，只给出与当前失败点直接相关的排查建议。"
-            )
-            if operation_result.get("advice_source") == "anomaly_advisor":
-                if self._wants_failure_anomaly_relation(user_message):
-                    reply_intent = (
-                        "回答失败与异常之间的关系。"
-                        "先说明失败的直接事实，再说明当前存在的异常状态，最后说明二者属于关联影响或排查线索。"
-                        "必须表述为影响因素、相关、导致相关环节不稳定，不得说成确定因果。"
-                        "不要重新选择、扩展或替换系统已给出的异常方向。"
-                        "面向用户自然表达，不要出现内部字段名、规则匹配或模块匹配等实现术语。"
-                    )
-                elif self._wants_anomaly_details(user_message):
-                    reply_intent = (
-                        "回答当前存在的异常。"
-                        "回答顺序必须是：当前存在的异常状态 → 该异常含义 → 影响的任务环节 → 建议检查项。"
-                        "只说明本轮提供的异常，不得补充候选模块、未匹配异常或正常/未知状态。"
-                        "如果需要提到失败，只能表述为异常对相关环节的影响因素，不得说成确定因果。"
-                        "面向用户自然表达，不要出现内部字段名、规则匹配或模块匹配等实现术语。"
-                    )
-                else:
-                    reply_intent = (
-                        "回答失败、卡点或处理建议。"
-                        "默认只说明失败现象、流程影响和建议检查项；不要主动展开异常证据状态，也不要主动说明异常与失败的关系。"
-                        "不要输出尚不能确认内部异常、没有异常证据、没有足够信息说明内部系统异常等句子。"
-                        "不要重新选择、扩展或替换系统已给出的异常方向。"
-                        "面向用户自然表达，不要出现内部字段名、规则匹配或模块匹配等实现术语。"
-                        "提到子任务时使用 子任务+ID+中文引号名称 的格式，例如：子任务 S1“移动至采油树控制面板附近”。"
-                        "不要把判据失败直接说成异常；不要把当前异常说成确定失败原因。"
-                    )
-            # ############# anomaly advice 接入结束 #############
-            return {
-                "type": "query",
-                "answer": self.generate_reply(
-                    reply_intent=reply_intent,
-                    user_message=user_message,
-                    task_state=task_state,
-                    # ############# anomaly advice 接入开始 #############
-                    operation_result=operation_result,
-                    # ############# anomaly advice 接入结束 #############
-                ),
-            }
-
-        if intent == "intervention":
-            action = self._normalize_action(intent_info.get("action"), task_state)
-            if not action:
-                return {
-                    "type": "irrelevant",
-                    "answer": self.generate_reply(
-                        reply_intent="说明用户有干预意图，但指令缺少必要信息，请用户补充具体动作或子任务",
-                        user_message=user_message,
-                        task_state=task_state,
-                        operation_result={"error": "invalid_or_incomplete_intervention_action", "raw_intent": intent_info},
-                    ),
-                }
-            return {"type": "intervention", "action": action, "raw_intent": intent_info}
-
-        return {
-            "type": "irrelevant",
-            "answer": self.generate_reply(
-                reply_intent=(
-                    "用户问题与当前任务无关。请采用简短、友好的拒答方式："
-                    "先说明无法处理或无法获取该类信息，再说明当前主要职责是协助监控和管理任务流程，"
-                    "最后提示用户可以继续询问任务进度、卡点原因、判据详情或流程干预。"
-                    "不要展开无关内容，也不要补充当前任务状态、判据或建议。"
-                ),
-                user_message=user_message,
-                task_state={
-                    "task_id": task_state.get("task_id"),
-                    "overall_status": "hidden_for_irrelevant",
-                    "current_subtask": None,
-                    "subtasks": [],
-                },
-                operation_result={"irrelevant": True, "hide_task_details": True},
-                max_tokens=160,
-            ),
-        }
-
-    # ---------- 全局模式处理 ----------
-    def process_global(self, user_message: str, all_tasks: List[Dict], task_manager) -> Dict[str, Any]:
-        """
-        处理全局模式下的用户消息。
-        1. 调用 LLM 识别用户意图、提取目标任务 ID。
-        2. 若成功提取到任务 ID，则复用局部模式处理逻辑（包括意图分类、确认、执行）。
-        3. 若无法提取，返回提示。
-        """
-        tasks_summary = json.dumps(all_tasks, ensure_ascii=False, indent=2)
-        extract_prompt = f"""你是一个任务路由助手。用户当前消息可能针对某个任务，也可能全局查询。
-所有可用任务如下：
-{tasks_summary}
-
-用户消息：{user_message}
-
-请输出 JSON 格式：
-{{
-    "intent": "query" / "intervention" / "irrelevant",
-    "target_task_id": "任务ID（如果用户明确指向某个任务，否则为 null）",
-    "confidence": 0.0-1.0,
-    "reason": "简短说明"
-}}
-仅输出 JSON，不要其他内容。"""
-        try:
-            result = self._safe_extract_json(
-                [{"role": "user", "content": extract_prompt}],
-                max_tokens=300,
-                default={"intent": "irrelevant", "target_task_id": None, "confidence": 0.0},
-                log_tag="global_extract"
-            )
-        except Exception:
-            result = {"intent": "irrelevant", "target_task_id": None, "confidence": 0.0}
-
-        intent = result.get("intent")
-        target_id = result.get("target_task_id")
-
-        if intent == "irrelevant":
-            return {
-                "type": "irrelevant",
-                "answer": self.generate_reply(
-                    reply_intent=(
-                        "用户问题与当前任务无关。请采用简短、友好的拒答方式："
-                        "先说明无法处理或无法获取该类信息，再说明当前主要职责是协助监控和管理任务流程，"
-                        "最后提示用户可以继续询问任务进度、卡点原因、判据详情或流程干预。"
-                        "不要展开无关内容，也不要补充当前任务状态、判据或建议。"
-                    ),
-                    user_message=user_message,
-                    task_state={
-                        "task_id": None,
-                        "overall_status": "hidden_for_irrelevant",
-                        "current_subtask": None,
-                        "subtasks": [],
-                    },
-                    operation_result={"irrelevant": True, "hide_task_details": True},
-                    max_tokens=160,
-                ),
-            }
-
-        if not target_id or target_id not in [t["task_id"] for t in all_tasks]:
-            task_ids = [t["task_id"] for t in all_tasks]
-            hint = "、".join(task_ids[:5]) + ("等" if len(task_ids) > 5 else "")
-            return {
-                "type": "irrelevant",
-                "answer": f"当前为全局模式，但未识别到具体任务 ID。可用任务：{hint}。请明确指定任务（例如“任务 {task_ids[0] if task_ids else 'xxx'} 当前进度”）。",
-                "refresh_required": False
-            }
-
-        task_state = task_manager.get_task_status(target_id)
-        if not task_state:
-            return {
-                "type": "irrelevant",
-                "answer": f"任务 {target_id} 不存在，请检查后重试。",
-                "refresh_required": False
-            }
-
-        local_result = self.process(user_message, task_state)
-        if local_result["type"] == "query":
-            return local_result
-        elif local_result["type"] == "intervention":
-            action = local_result.get("action")
-            if not action:
-                answer = self.generate_reply(
-                    reply_intent="说明干预动作解析失败",
-                    user_message=user_message,
-                    task_state=task_state,
-                    operation_result={"error": "missing_action"}
-                )
-                return {"type": "irrelevant", "answer": answer, "refresh_required": False}
-            pending_result = task_manager.set_pending_intervention(
-                task_id=target_id,
-                action=action,
-                user_message=user_message,
-                raw_intent=local_result.get("raw_intent") or {}
-            )
-            answer = self.generate_confirmation_request(user_message, action, task_state)
-            return {
-                "type": "intervention_pending",
-                "answer": answer,
-                "pending_action": action,
-                "result": pending_result,
-                "refresh_required": False
-            }
-        else:
-            return local_result
-
-    # ---------- 确认判断 ----------
-    def classify_confirmation(
+    def answer_query(
         self,
         user_message: str,
-        pending_intervention: Dict[str, Any],
         task_state: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """调用 LLM 判断用户是否确认待执行干预。失败时降级为 other，避免误操作。"""
-        print("pending 干扰为：", pending_intervention)
-        prompt = CONFIRM_PROMPT.format(
+        pending_intervention: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Answer a task query after IntentRouter has selected the Query path."""
+        operation_result = self._build_query_operation_result(task_state, user_message=user_message)
+        reply_intent = (
+            "根据用户问题和本轮任务事实回答。"
+            "回答失败、卡点或处理建议时，先说明失败现象和完成条件未满足的含义；失败不等于机器人内部异常。"
+            "用户未明确询问异常或内部故障时，不主动说明异常证据状态，也不要补充否定性异常说明。"
+            "没有有效异常建议时，不得断言存在内部异常，只给出与当前失败点直接相关的排查建议。"
+        )
+        if operation_result.get("advice_source") == "anomaly_advisor":
+            if self._wants_failure_anomaly_relation(user_message):
+                reply_intent = (
+                    "回答失败与异常之间的关系。先说明失败的直接事实，再说明当前存在的异常状态，"
+                    "最后说明二者属于关联影响或排查线索，不得说成确定因果。"
+                )
+            elif self._wants_anomaly_details(user_message):
+                reply_intent = (
+                    "回答当前存在的异常。按照当前异常状态、异常含义、影响环节和建议检查项的顺序回答；"
+                    "只说明本轮提供的异常，不得补充候选模块或未提供的状态。"
+                )
+            else:
+                reply_intent = (
+                    "回答失败、卡点或处理建议。默认只说明失败现象、流程影响和建议检查项；"
+                    "不要主动展开异常证据或把异常说成确定失败原因。"
+                )
+        if pending_intervention:
+            reply_intent = (
+                "回答用户关于当前待确认控制动作的问题或影响。不得执行、替换或清除该动作；"
+                "说明确认前任务流程不会变化。"
+            )
+            operation_result = {
+                **operation_result,
+                "pending_action": pending_intervention.get("action") or {},
+                "requires_user_confirmation": True,
+            }
+        return self.generate_reply(
+            reply_intent=reply_intent,
             user_message=user_message,
-            pending_intervention=json.dumps(pending_intervention, ensure_ascii=False, indent=2),
-            task_summary=json.dumps(self._task_summary(task_state), ensure_ascii=False, indent=2),
+            task_state=task_state,
+            operation_result=operation_result,
         )
-        result = self._safe_extract_json(
-            [{"role": "user", "content": prompt}],
-            max_tokens=250,
-            default={"decision": "other", "confidence": 0.0},
-            log_tag="classify_confirmation",
+
+    def answer_global_query(self, user_message: str, available_tasks: List[Dict[str, Any]]) -> str:
+        """Answer a cross-task query without selecting a second intent path."""
+        return self.generate_reply(
+            reply_intent="根据可用任务列表回答全局任务查询；只使用本轮提供的任务事实。",
+            user_message=user_message,
+            task_state={
+                "task_id": "global",
+                "description": "全局任务视图",
+                "overall_status": "global",
+                "current_subtask": None,
+                "subtasks": [],
+            },
+            operation_result={"global_tasks": available_tasks},
         )
-        if not isinstance(result, dict):
-            return {"decision": "other", "confidence": 0.0}
-        if result.get("decision") not in self.VALID_CONFIRM_DECISIONS:
-            return {"decision": "other", "confidence": 0.0}
-        print("LLM classify_confirmation result:", result)
-        return result
+
+    def answer_query_clarification(
+        self,
+        user_message: str,
+        task_state: Optional[Dict[str, Any]] = None,
+        reason: Optional[str] = None,
+    ) -> str:
+        """Safely ask for a clearer message after routing fallback."""
+        state = task_state or {
+            "task_id": None,
+            "overall_status": "unknown",
+            "current_subtask": None,
+            "subtasks": [],
+        }
+        return self.generate_reply(
+            reply_intent=(
+                "本轮无法可靠判断用户要查询的内容。请只请求用户补充任务 ID、查询主题或具体问题；"
+                "不得推断为流程控制，也不得修改任务。"
+            ),
+            user_message=user_message,
+            task_state=state,
+            operation_result={"routing_clarification": reason or "unclear_query"},
+            max_tokens=240,
+        )
+
+    def answer_irrelevant(
+        self,
+        user_message: str,
+        task_state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Decline an irrelevant Query while preserving the legacy response type."""
+        state = task_state or {}
+        return self.generate_reply(
+            reply_intent=(
+                "用户问题与任务无关。简短说明当前只能处理任务进度、失败原因、判据、异常建议或流程干预；"
+                "不要展开无关内容或任务细节。"
+            ),
+            user_message=user_message,
+            task_state={
+                "task_id": state.get("task_id"),
+                "overall_status": "hidden_for_irrelevant",
+                "current_subtask": None,
+                "subtasks": [],
+            },
+            operation_result={"irrelevant": True, "hide_task_details": True},
+            max_tokens=160,
+        )
+
+    def answer_control_clarification(
+        self,
+        user_message: str,
+        task_state: Dict[str, Any],
+        reason: Optional[str] = None,
+    ) -> str:
+        """Ask for missing control fields without creating pending state."""
+        return self.generate_reply(
+            reply_intent="说明控制请求信息不完整，请用户补充动作、目标子任务、参数名或修改值。",
+            user_message=user_message,
+            task_state=task_state,
+            operation_result={"error": reason or "incomplete_control_request"},
+            max_tokens=300,
+        )
 
     def generate_confirmation_request(
         self,
@@ -518,6 +401,12 @@ class QueryResponder:
         """Convert operation_result into a compact natural-language context."""
         if not isinstance(operation_result, dict) or not operation_result:
             return {}
+
+        if operation_result.get("global_tasks") is not None:
+            return {
+                "处理类型": "全局任务查询",
+                "可用任务": operation_result.get("global_tasks") or [],
+            }
 
         if operation_result.get("requires_user_confirmation") or operation_result.get("pending_action"):
             action = operation_result.get("pending_action") or {}
@@ -827,128 +716,6 @@ class QueryResponder:
             return f"  - {name}{fallback_suffix}"
         return f"  - {fallback_suffix}"
     # ################
-
-    # ---------- 私有辅助方法 ----------
-    def _is_obvious_query(self, user_message: str) -> bool:
-        message = (user_message or "").strip().lower()
-        if not message:
-            return False
-        intervention_words = (
-            "回退", "重试", "修改", "改成", "调整", "强制", "人工完成",
-            "确认", "取消", "rollback", "retry", "change", "override",
-        )
-        if any(word in message for word in intervention_words):
-            return False
-        query_words = (
-            "当前任务状态", "当前状态", "任务状态", "状态是什么", "现在状态",
-            "进度", "当前进展", "推进到", "到哪", "当前步骤", "当前子任务",
-            "卡点", "卡在哪", "为什么", "原因", "失败", "异常", "异常建议",
-            "判据", "软判据", "硬判据", "下一步", "建议", "怎么办",
-            "status", "progress", "state", "current",
-        )
-        return any(word in message for word in query_words)
-
-    def _classify_intent(self, user_message: str, task_state: Dict[str, Any]) -> Dict[str, Any]:
-        """调用 LLM 判断意图。失败时降级为 irrelevant，避免误操作任务。"""
-        if self._is_obvious_query(user_message):
-            return {"intent": "query", "confidence": 1.0, "source": "deterministic_query_guard"}
-
-        summary = self._task_summary(task_state)
-        available_subtasks = [
-            {"id": st.get("subtask_id"), "name": st.get("name"), "status": st.get("status")}
-            for st in task_state.get("subtasks", [])
-        ]
-        prompt = CLASSIFY_PROMPT.format(
-            user_message=user_message,
-            task_summary=json.dumps(summary, ensure_ascii=False),
-            available_subtasks=json.dumps(available_subtasks, ensure_ascii=False),
-        )
-        result = self._safe_extract_json(
-            [{"role": "user", "content": prompt}],
-            max_tokens=500,
-            default={"intent": "irrelevant", "confidence": 0.0},
-            log_tag="classify_intent",
-        )
-        if not isinstance(result, dict):
-            return {"intent": "irrelevant", "confidence": 0.0}
-        if result.get("intent") not in self.VALID_INTENTS:
-            return {"intent": "irrelevant", "confidence": 0.0}
-        return result
-
-    def _normalize_action(self, action: Any, task_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """对 LLM 输出动作做最小结构校验，不做自然语言规则解析。"""
-        if not isinstance(action, dict):
-            return None
-        action_type = action.get("action")
-        if action_type not in self.VALID_ACTIONS:
-            return None
-
-        current_subtask = task_state.get("current_subtask")
-        valid_subtasks = {st.get("subtask_id") for st in task_state.get("subtasks", [])}
-
-        if action_type == "rollback":
-            target = action.get("to_subtask") or current_subtask
-            if target not in valid_subtasks:
-                return None
-            return {"action": "rollback", "to_subtask": target}
-
-        if action_type in {"retry", "force_complete"}:
-            subtask_id = action.get("subtask_id") or current_subtask
-            if subtask_id not in valid_subtasks:
-                return None
-            if action_type == "force_complete" and subtask_id != current_subtask:
-                return None
-            return {"action": action_type, "subtask_id": subtask_id}
-
-        if action_type == "change_parameter":
-            parameter = action.get("parameter")
-            value = action.get("value")
-            subtask_id = action.get("subtask_id") or current_subtask
-            if not parameter or value is None or subtask_id not in valid_subtasks:
-                return None
-            # 尝试转换 value 类型
-            if isinstance(value, str):
-                if value.replace('.', '', 1).isdigit():
-                    value = float(value)
-                elif value.lower() in ("true", "false"):
-                    value = value.lower() == "true"
-            return {"action": "change_parameter", "subtask_id": subtask_id, "parameter": parameter, "value": value}
-
-        # 新增：override_field 动作校验
-        if action_type == "override_field":
-            field = action.get("field")
-            value = action.get("value")
-            subtask_id = action.get("subtask_id") or current_subtask
-            if not field or value is None or subtask_id not in valid_subtasks:
-                return None
-            # 类型转换
-            if isinstance(value, str):
-                if value.replace('.', '', 1).isdigit():
-                    value = float(value)
-                elif value.lower() in ("true", "false"):
-                    value = value.lower() == "true"
-            return {"action": "override_field", "subtask_id": subtask_id, "field": field, "value": value}
-
-        return None
-
-    def _task_summary(self, task_state: Dict[str, Any]) -> Dict[str, Any]:
-        return {
-            "task_id": task_state.get("task_id"),
-            "description": task_state.get("description"),
-            "overall_status": task_state.get("overall_status"),
-            "current_subtask": task_state.get("current_subtask"),
-            "pending_intervention": task_state.get("pending_intervention"),
-            "subtasks": [
-                {
-                    "id": st.get("subtask_id"),
-                    "name": st.get("name"),
-                    "status": st.get("status"),
-                    "evidence_summary": st.get("evidence_summary", ""),
-                }
-                for st in task_state.get("subtasks", [])
-            ],
-        }
-
 
     # ############# anomaly advice 接入开始 #############
     def _build_query_operation_result(self, task_state: Dict[str, Any], user_message: str = "") -> Dict[str, Any]:
@@ -1310,20 +1077,6 @@ class QueryResponder:
         advice = operation_result.get("anomaly_advice")
         return isinstance(advice, dict) and bool(advice.get("advice_generated"))
     # ############# anomaly advice 接入结束 #############
-
-    def _safe_extract_json(
-        self,
-        messages: list[dict],
-        max_tokens: int,
-        default: Dict[str, Any],
-        log_tag: str,
-    ) -> Dict[str, Any]:
-        try:
-            result = self.llm.extract_json(messages, max_tokens=max_tokens)
-            return result if isinstance(result, dict) else default
-        except Exception as e:
-            logger.exception("LLM %s failed: %s", log_tag, e)
-            return default
 
     def _fallback_reply(
         self,
