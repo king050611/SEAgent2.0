@@ -3,7 +3,7 @@
   "description": "执行采油树控制面板插头插入任务",
   "created_at": 1781775502.7322316,
   "overall_status": "in_progress",
-  "current_subtask": "S3",
+  "current_subtask": "S2",
   "subtasks": [
     {
       "name": "移动至采油树控制面板附近",
@@ -84,47 +84,11 @@
         "hole_conflict": "hole_conflict"
       },
       "subtask_id": "S2",
-      "status": "completed",
+      "status": "in_progress",
       "retry_count": 0,
-      "completion_criteria": {
-        "hard_met": true,
-        "hard_details": {
-          "slot_pose_delta_max": {
-            "expected": 0.01,
-            "actual": 0.005,
-            "met": true
-          },
-          "plug_pose_delta_max": {
-            "expected": 0.01,
-            "actual": 0.006,
-            "met": true
-          }
-        },
-        "hard_unmet_details": [],
-        "soft_met": true,
-        "soft_details": {
-          "slot_stable_flag": {
-            "required": 1,
-            "actual": 1,
-            "met": true
-          },
-          "plug_stable_flag": {
-            "required": 1,
-            "actual": 1,
-            "met": true
-          }
-        },
-        "soft_unmet_details": [],
-        "require_approval": true,
-        "all_met": true
-      },
-      "evidence_summary": "所有判据满足; 已记录状态字段: plug_pose_delta_max, plug_stable_flag, slot_pose_delta_max, slot_stable_flag",
-      "latest_state": {
-        "slot_pose_delta_max": 0.005,
-        "plug_pose_delta_max": 0.006,
-        "slot_stable_flag": 1,
-        "plug_stable_flag": 1
-      }
+      "completion_criteria": {},
+      "evidence_summary": "",
+      "latest_state": {}
     },
     {
       "name": "机械臂原点到夹取起点的路径规划",
@@ -140,7 +104,7 @@
         "path_not_found": "manual_intervention"
       },
       "subtask_id": "S3",
-      "status": "in_progress",
+      "status": "pending",
       "retry_count": 0,
       "completion_criteria": {},
       "evidence_summary": "",

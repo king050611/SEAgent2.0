@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional, List
 import yaml
 from .llm_client import LLMClient
 from .prompts import REPLY_SYSTEM_PROMPT
+from .task_intent_retriever import STATIC_QUERY_TOPICS, retrieve_task_intent
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +25,28 @@ class QueryResponder:
         user_message: str,
         task_state: Dict[str, Any],
         pending_intervention: Optional[Dict[str, Any]] = None,
+        query_topics: Optional[List[str]] = None,
     ) -> str:
         """Answer a task query after IntentRouter has selected the Query path."""
-        operation_result = self._build_query_operation_result(task_state, user_message=user_message)
+        topics = list(query_topics or ["runtime"])
+        operation_result = self._build_query_operation_result(
+            task_state,
+            user_message=user_message,
+            query_topics=topics,
+        )
         reply_intent = (
             "根据用户问题和本轮任务事实回答。"
             "回答失败、卡点或处理建议时，先说明失败现象和完成条件未满足的含义；失败不等于机器人内部异常。"
             "用户未明确询问异常或内部故障时，不主动说明异常证据状态，也不要补充否定性异常说明。"
             "没有有效异常建议时，不得断言存在内部异常，只给出与当前失败点直接相关的排查建议。"
         )
+        if set(topics) & STATIC_QUERY_TOPICS:
+            reply_intent = (
+                f"{reply_intent}"
+                "用户正在查询任务准入基础信息。必须优先依据“任务准入信息”回答；"
+                "字段为空、null 或未提供时，应明确说明该信息未提供，不得猜测。"
+                "不要用当前判据、异常或流程状态替代准入信息。"
+            )
         if operation_result.get("advice_source") == "anomaly_advisor":
             if self._wants_failure_anomaly_relation(user_message):
                 reply_intent = (
@@ -54,6 +68,10 @@ class QueryResponder:
                 "回答用户关于当前待确认控制动作的问题或影响。不得执行、替换或清除该动作；"
                 "说明确认前任务流程不会变化。"
             )
+            if set(topics) & STATIC_QUERY_TOPICS:
+                reply_intent = (
+                    f"{reply_intent}如果用户同时询问任务准入基础信息，也要依据“任务准入信息”回答。"
+                )
             operation_result = {
                 **operation_result,
                 "pending_action": pending_intervention.get("action") or {},
@@ -135,6 +153,17 @@ class QueryResponder:
         reason: Optional[str] = None,
     ) -> str:
         """Ask for missing control fields without creating pending state."""
+        if str(reason or "").startswith("action_compile_generation_failed"):
+            return self.generate_reply(
+                reply_intent=(
+                    "系统已识别到这是流程控制请求，但未能生成符合执行协议的控制结构；"
+                    "请说明本次未修改任务流程，并请用户重新提交该指令。"
+                ),
+                user_message=user_message,
+                task_state=task_state,
+                operation_result={"error": reason or "action_compile_generation_failed"},
+                max_tokens=300,
+            )
         return self.generate_reply(
             reply_intent="说明控制请求信息不完整，请用户补充动作、目标子任务、参数名或修改值。",
             user_message=user_message,
@@ -391,6 +420,10 @@ class QueryResponder:
             )
             if anomaly_context:
                 context["当前异常说明"] = anomaly_context
+
+        task_intent_facts = (operation_result or {}).get("task_intent_facts")
+        if task_intent_facts:
+            context["任务准入信息"] = task_intent_facts
 
         if (operation_result or {}).get("irrelevant"):
             context["本轮处理说明"] = "用户问题与当前任务无关，回复时不要展开任务细节。"
@@ -718,7 +751,14 @@ class QueryResponder:
     # ################
 
     # ############# anomaly advice 接入开始 #############
-    def _build_query_operation_result(self, task_state: Dict[str, Any], user_message: str = "") -> Dict[str, Any]:
+    def _build_query_operation_result(
+        self,
+        task_state: Dict[str, Any],
+        user_message: str = "",
+        query_topics: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        topics = list(query_topics or ["runtime"])
+        task_intent_facts = retrieve_task_intent(task_state, topics)
         advice = task_state.get("latest_anomaly_advice") if isinstance(task_state, dict) else None
         if (
             isinstance(advice, dict)
@@ -726,7 +766,7 @@ class QueryResponder:
             and self._is_current_anomaly_advice(task_state, advice)
         ):
             include_filtered = self._wants_filtered_anomaly_details(user_message)
-            return {
+            result = {
                 "advice_source": "anomaly_advisor",
                 "anomaly_advice": self._sanitize_anomaly_advice_for_reply(advice, include_filtered=include_filtered),
                 "anomaly_advice_summary": self._build_anomaly_advice_summary(
@@ -737,7 +777,14 @@ class QueryResponder:
                 ),
                 "criteria_failure_policy": "fallback_only",
             }
-        return {"advice_source": "criteria_failure_policy"}
+            if task_intent_facts:
+                result["task_intent_facts"] = task_intent_facts
+                result["query_topics"] = topics
+            return result
+        result = {"advice_source": "criteria_failure_policy", "query_topics": topics}
+        if task_intent_facts:
+            result["task_intent_facts"] = task_intent_facts
+        return result
 
     def _build_anomaly_advice_summary(
         self,

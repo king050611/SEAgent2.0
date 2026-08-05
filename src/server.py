@@ -6,6 +6,7 @@ import time
 import logging
 from flask import Flask, request, jsonify, render_template
 from pathlib import Path
+from .task_intent_retriever import compact_task_intent_summary
 
 logger = logging.getLogger(__name__)
 
@@ -142,6 +143,7 @@ def create_app(task_manager, query_responder, intent_router, state_monitor, stat
                     "overall_status": state.get("overall_status"),
                     "current_subtask": state.get("current_subtask"),
                     "pending_intervention": state.get("pending_intervention"),
+                    "task_intent_summary": compact_task_intent_summary(state),
                     "subtasks": [
                         {
                             "id": subtask.get("subtask_id"),
@@ -199,7 +201,12 @@ def create_app(task_manager, query_responder, intent_router, state_monitor, stat
                     answer = query_responder.answer_global_query(user_message, available_tasks)
                     return jsonify({"type": "query", "answer": answer, "refresh_required": False})
 
-                answer = query_responder.answer_query(user_message, task_state, pending)
+                answer = query_responder.answer_query(
+                    user_message,
+                    task_state,
+                    pending,
+                    query_topics=route.get("query_topics", []),
+                )
                 return jsonify({"type": "query", "answer": answer, "refresh_required": False})
 
             if route.get("confirm_stage") == "decision":

@@ -16,8 +16,15 @@ class FakeRouter:
 class FakeResponder:
     def __init__(self):
         self.query_clarification_calls = []
+        self.query_calls = []
 
-    def answer_query(self, user_message, task_state, pending_intervention=None):
+    def answer_query(self, user_message, task_state, pending_intervention=None, query_topics=None):
+        self.query_calls.append({
+            "user_message": user_message,
+            "task_state": task_state,
+            "pending_intervention": pending_intervention,
+            "query_topics": query_topics,
+        })
         return "query answer"
 
     def answer_global_query(self, user_message, available_tasks):
@@ -48,6 +55,10 @@ class FakeTaskManager:
         self.state = {
             "task_id": "T1", "description": "task", "overall_status": "in_progress",
             "current_subtask": "S1",
+            "metadata": {
+                "intent_id": "T1",
+                "location": {"water_depth_m": 200.0},
+            },
             "subtasks": [{"subtask_id": "S1", "name": "one", "status": "in_progress"}],
         }
         if pending:
@@ -103,7 +114,7 @@ class ServerIntentRoutingTest(unittest.TestCase):
         client, router, manager, responder = build_client({
             "intent": "query", "target_task_id": "T1", "query_scope": "task",
             "confirm_stage": None, "decision": None, "action": None,
-            "needs_clarification": False,
+            "needs_clarification": False, "query_topics": ["location", "equipment"],
         })
 
         response = client.post("/api/query", json={"message": "progress", "task_id": "T1"})
@@ -112,6 +123,7 @@ class ServerIntentRoutingTest(unittest.TestCase):
         self.assertEqual(response.get_json()["type"], "query")
         self.assertEqual(len(router.calls), 1)
         self.assertEqual(manager.set_calls, [])
+        self.assertEqual(responder.query_calls[0]["query_topics"], ["location", "equipment"])
 
     def test_safe_query_fallback_requests_clarification(self):
         client, router, manager, responder = build_client({
@@ -221,6 +233,8 @@ class ServerIntentRoutingTest(unittest.TestCase):
         self.assertEqual(response.get_json()["type"], "query")
         self.assertEqual(len(router.calls), 1)
         self.assertTrue(router.calls[0]["global_mode"])
+        summary = router.calls[0]["available_tasks"][0]["task_intent_summary"]
+        self.assertEqual(summary["location"]["water_depth_m"], 200.0)
 
     def test_global_summary_query_uses_available_tasks(self):
         client, router, manager, responder = build_client({
