@@ -3,7 +3,7 @@
   "description": "执行采油树控制面板插头插入任务",
   "created_at": 1781775502.7322316,
   "overall_status": "in_progress",
-  "current_subtask": "S1",
+  "current_subtask": "S2",
   "subtasks": [
     {
       "name": "移动至采油树控制面板附近",
@@ -19,11 +19,54 @@
         "panel_not_visible": "panel_out_of_view"
       },
       "subtask_id": "S1",
-      "status": "in_progress",
+      "status": "completed",
       "retry_count": 0,
-      "completion_criteria": {},
-      "evidence_summary": "人工确认回退后重新执行",
-      "latest_state": {}
+      "completion_criteria": {
+        "hard_met": true,
+        "hard_details": {
+          "distance_error_max": {
+            "expected": 0.1,
+            "actual": 0.05,
+            "met": true
+          },
+          "angle_error_max": {
+            "expected": 10.0,
+            "actual": 5.0,
+            "met": true
+          },
+          "speed_stable_frames": {
+            "expected": 5,
+            "actual": 5,
+            "met": true
+          }
+        },
+        "hard_unmet_details": [],
+        "soft_met": true,
+        "soft_details": {
+          "min_grid_count": {
+            "required": 10,
+            "actual": 15,
+            "met": true
+          },
+          "panel_visible_flag": {
+            "required": 1,
+            "actual": 1,
+            "met": true
+          }
+        },
+        "soft_unmet_details": [],
+        "require_approval": true,
+        "all_met": true
+      },
+      "evidence_summary": "所有判据满足; 已记录状态字段: angle_error_max, distance_error_max, min_grid_count, panel_visible_flag, plug_stable_flag, speed_stable_frames",
+      "latest_state": {
+        "distance_error_max": 0.05,
+        "angle_error_max": 5.0,
+        "speed_stable_frames": 5,
+        "min_grid_count": 15,
+        "panel_visible_flag": 1,
+        "plug_stable_flag": 1
+      }
     },
     {
       "name": "视觉识别插孔和插头的位置",
@@ -41,7 +84,7 @@
         "hole_conflict": "hole_conflict"
       },
       "subtask_id": "S2",
-      "status": "pending",
+      "status": "in_progress",
       "retry_count": 0,
       "completion_criteria": {},
       "evidence_summary": "",

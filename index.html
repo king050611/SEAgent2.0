@@ -205,11 +205,6 @@
             cursor: pointer;
             font-size: 0.7rem;
         }
-        .waiting-approval-notice {
-            font-size: 0.7rem;
-            color: #ffc107;
-            margin-left: 0.5rem;
-        }
     </style>
 </head>
 <body>
@@ -254,8 +249,8 @@
     let pollInterval = null;
     let taskListPollInterval = null;
     let globalMode = false;
-    let uiAutoRefreshEnabled = true;
-    let currentWaitingSubtask = null;
+    const taskRefreshInFlight = new Map();
+    const displayedNotificationKeys = new Set();
     const SUBTASK_ORDER = ["S1","S2","S3","S4","S5","S6","S7","S8"];
 
     async function fetchTaskList() {
@@ -286,7 +281,7 @@
         const container = document.getElementById("taskListContainer");
         if (!tasks.length) {
             container.innerHTML = '<div style="padding: 1rem; color:#8b93b0;">暂无任务，请将任务JSON文件放入 ./task 文件夹</div>';
-            return;
+            return tasks;
         }
         let html = "";
         for (const task of tasks) {
@@ -314,16 +309,25 @@
                 selectTask(taskId);
             });
         });
+        return tasks;
+    }
+
+    function updateActiveTaskItem(taskId) {
+        document.querySelectorAll(".task-item").forEach(item => {
+            item.classList.toggle(
+                "active",
+                item.getAttribute("data-task-id") === taskId
+            );
+        });
     }
 
     async function selectTask(taskId) {
         if (currentTaskId === taskId) return;
         currentTaskId = taskId;
-        if (pollInterval) clearInterval(pollInterval);
-        uiAutoRefreshEnabled = true;
-        currentWaitingSubtask = null;
-        await refreshAllData(true);
-        startPolling(taskId);
+        updateActiveTaskItem(taskId);
+        await refreshCurrentTask(true);
+        if (taskId !== currentTaskId) return;
+        startCurrentTaskPolling(taskId);
     }
 
     async function fetchTaskStatus(taskId) {
@@ -332,66 +336,68 @@
         return await res.json();
     }
 
-    async function refreshAllData(forceRefreshUI = false) {
-        if (!currentTaskId) return;
-        const status = await fetchTaskStatus(currentTaskId);
-        if (status) {
-            if (status.notifications && Array.isArray(status.notifications)) {
-                const unread = status.notifications.filter(n => n.read === false);
-                if (unread.length > 0) {
-                    for (const notif of unread) {
-                        addMessage("bot", notif.content);
-                    }
-                    try {
-                        await fetch(`/api/task/${currentTaskId}/notifications/clear`, { method: "POST" });
-                    } catch (e) {
-                        console.warn("清除通知失败", e);
-                    }
-                }
-            }
+    async function refreshCurrentTask(forceRefreshUI = false) {
+        const taskId = currentTaskId;
+        if (!taskId) return;
 
-            const hasWaitingApproval = status.subtasks.some(st => st.status === "waiting_approval" && st.subtask_id === status.current_subtask);
-            const waitingId = hasWaitingApproval ? status.current_subtask : null;
+        if (taskRefreshInFlight.has(taskId)) {
+            return taskRefreshInFlight.get(taskId);
+        }
 
-            updateGlobalProgress(status);
+        const refreshPromise = doRefreshCurrentTask(taskId, forceRefreshUI)
+            .finally(() => {
+                taskRefreshInFlight.delete(taskId);
+            });
 
-            if (forceRefreshUI) {
-                renderSubtaskDetail(status);
-                uiAutoRefreshEnabled = true;
-                currentWaitingSubtask = null;
-            } else if (hasWaitingApproval) {
-                if (uiAutoRefreshEnabled) {
-                    uiAutoRefreshEnabled = false;
-                    currentWaitingSubtask = waitingId;
-                    const container = document.getElementById("subtaskDetailContainer");
-                    if (container.innerHTML === "" || container.innerHTML === "请选择任务") {
-                        renderSubtaskDetail(status);
-                    } else {
-                        const notice = document.querySelector(".waiting-approval-notice");
-                        if (!notice) {
-                            const header = document.querySelector(".subtask-detail > div:first-child");
-                            if (header && !header.querySelector(".waiting-approval-notice")) {
-                                const badge = document.createElement("span");
-                                badge.className = "waiting-approval-notice";
-                                badge.innerText = "⏳ 等待审核，自动刷新已暂停";
-                                header.appendChild(badge);
-                            }
-                        }
-                    }
-                }
-            } else {
-                if (!uiAutoRefreshEnabled) {
-                    uiAutoRefreshEnabled = true;
-                    currentWaitingSubtask = null;
-                    renderSubtaskDetail(status);
-                    const badge = document.querySelector(".waiting-approval-notice");
-                    if (badge) badge.remove();
-                } else {
-                    renderSubtaskDetail(status);
-                }
-            }
-        } else {
+        taskRefreshInFlight.set(taskId, refreshPromise);
+        return refreshPromise;
+    }
+
+    async function doRefreshCurrentTask(taskId, forceRefreshUI = false) {
+        const status = await fetchTaskStatus(taskId);
+        if (taskId !== currentTaskId) return;
+
+        if (!status) {
             document.getElementById("subtaskDetailContainer").innerHTML = '<div>无法加载任务详情</div>';
+            return;
+        }
+
+        await handleNotifications(taskId, status.notifications);
+        if (taskId !== currentTaskId) return;
+
+        updateGlobalProgress(status);
+        renderSubtaskDetail(status);
+    }
+
+    function getNotificationKey(taskId, notification) {
+        return [
+            taskId,
+            notification.timestamp ?? "",
+            notification.content ?? ""
+        ].join("::");
+    }
+
+    async function handleNotifications(taskId, notifications) {
+        if (!Array.isArray(notifications)) return;
+
+        const unread = notifications.filter(item => item.read === false);
+        let hasNewNotification = false;
+
+        for (const notification of unread) {
+            const key = getNotificationKey(taskId, notification);
+            if (displayedNotificationKeys.has(key)) continue;
+
+            displayedNotificationKeys.add(key);
+            addMessage("bot", notification.content);
+            hasNewNotification = true;
+        }
+
+        if (!hasNewNotification) return;
+
+        try {
+            await fetch(`/api/task/${taskId}/notifications/clear`, { method: "POST" });
+        } catch (error) {
+            console.warn("清除通知失败", error);
         }
     }
 
@@ -464,11 +470,7 @@
                         ? `✅ 子任务 ${subId} 已人工通过，任务已完成。`
                         : `✅ 子任务 ${subId} 已人工通过，继续推进。`;
                     addMessage("bot", message);
-                    await refreshAllData(true);
-                    uiAutoRefreshEnabled = true;
-                    currentWaitingSubtask = null;
-                    const badge = document.querySelector(".waiting-approval-notice");
-                    if (badge) badge.remove();
+                    await refreshCurrentTask(true);
                 } else {
                     addMessage("bot", `❌ 审核失败: ${data.message || data.error || "未知错误"}`);
                 }
@@ -487,12 +489,12 @@
         document.getElementById("globalProgress").innerHTML = `任务: ${taskState.task_id} | 进度: ${percent}% (${completed}/${total})`;
     }
 
-    function startPolling(taskId) {
+    function startCurrentTaskPolling(taskId) {
         if (pollInterval) clearInterval(pollInterval);
         pollInterval = setInterval(async () => {
             if (!taskId || taskId !== currentTaskId) return;
-            await refreshAllData(false);
-        }, 3000);
+            await refreshCurrentTask(false);
+        }, 1000);
     }
 
     async function sendMessage(message) {
@@ -511,11 +513,7 @@
         }
         addMessage("bot", data.answer || "请求已处理。");
         if (data.refresh_required === true) {
-            await refreshAllData(true);
-            uiAutoRefreshEnabled = true;
-            currentWaitingSubtask = null;
-            const badge = document.querySelector(".waiting-approval-notice");
-            if (badge) badge.remove();
+            await refreshCurrentTask(true);
         }
     }
 
@@ -542,31 +540,28 @@
         });
     }
 
-    async function refreshAll(scanFirst = false) {
-        if (scanFirst) await scanTasks(true);
-        await renderTaskList();
-        if (currentTaskId) {
-            await refreshAllData(true);
-        } else {
-            const tasks = await fetchTaskList();
-            if (tasks.length > 0) await selectTask(tasks[0].task_id);
+    async function handleCurrentTaskRemoved() {
+        if (!currentTaskId) return;
+        const tasks = await fetchTaskList();
+        const exists = tasks.some(task => task.task_id === currentTaskId);
+        if (exists) return;
+
+        currentTaskId = null;
+        updateActiveTaskItem(null);
+        document.getElementById("subtaskDetailContainer").innerHTML = "<div>请选择任务</div>";
+        if (pollInterval) {
+            clearInterval(pollInterval);
+            pollInterval = null;
         }
+        document.getElementById("globalProgress").innerText = "未选择任务";
     }
 
     function startTaskListPolling() {
         if (taskListPollInterval) clearInterval(taskListPollInterval);
         taskListPollInterval = setInterval(async () => {
-            await refreshAll();
-            const tasks = await fetchTaskList();
-            const exists = tasks.some(t => t.task_id === currentTaskId);
-            if (currentTaskId && !exists) {
-                currentTaskId = null;
-                document.getElementById("subtaskDetailContainer").innerHTML = "<div>请选择任务</div>";
-                if (pollInterval) clearInterval(pollInterval);
-                document.getElementById("globalProgress").innerText = "未选择任务";
-                uiAutoRefreshEnabled = true;
-                currentWaitingSubtask = null;
-            }
+            await scanTasks(true);
+            await renderTaskList();
+            await handleCurrentTaskRemoved();
         }, 30000);
     }
 
@@ -591,7 +586,8 @@
 
     document.getElementById("refreshTaskListBtn").addEventListener("click", async () => {
         await scanTasks(false);
-        await refreshAll();
+        await renderTaskList();
+        await handleCurrentTaskRemoved();
     });
     document.getElementById("sendQueryBtn").addEventListener("click", () => {
         const input = document.getElementById("queryInput");
@@ -605,9 +601,9 @@
     });
 
     async function init() {
-        await refreshAll(true);
+        await scanTasks(true);
+        const tasks = await renderTaskList();
         startTaskListPolling();
-        const tasks = await fetchTaskList();
         if (tasks.length > 0) await selectTask(tasks[0].task_id);
         else addMessage("bot", "📭 当前没有任务。请将任务JSON文件放入 ./task 文件夹。");
     }
