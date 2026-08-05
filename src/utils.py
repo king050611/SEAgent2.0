@@ -32,3 +32,11 @@ def get_logger(name: str, log_file: str = "task_monitor.log", level=logging.INFO
 
 def current_timestamp() -> float:
     return datetime.now().timestamp()
+
+
+def resolve_path_from_base(path: str | Path, base_dir: Path) -> Path:
+    """Resolve a config path relative to the project base directory."""
+    resolved = Path(path).expanduser()
+    if resolved.is_absolute():
+        return resolved
+    return base_dir / resolved

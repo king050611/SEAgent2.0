@@ -3,7 +3,7 @@ server:
   port: 8889
 
 llm:
-    model_path: "/root/autodl-tmp/Qwen3.5-9B"
+    model_path: "/root/autodl-tmp/model/Qwen3.5-9B"
 
 persistence:
   type: "file"

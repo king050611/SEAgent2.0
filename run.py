@@ -35,7 +35,7 @@ from src.intervention_handler import InterventionHandler
 from src.query_responder import QueryResponder
 from src.state_monitor import StateMonitor
 from src.task_scanner import TaskScanner
-from src.utils import load_yaml_config
+from src.utils import load_yaml_config, resolve_path_from_base
 
 # 强制离线环境
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -49,7 +49,7 @@ TASK_TEMPLATES = load_yaml_config(CONFIG_DIR / "task_templates.yaml")
 CRITERIA_CONFIG = load_yaml_config(CONFIG_DIR / "criteria.yaml")
 STATE_MAPPING = load_yaml_config(CONFIG_DIR / "state_mapping.yaml")
 
-LOCAL_MODEL_PATH = MONITOR_CONFIG["llm"]["model_path"]
+LOCAL_MODEL_PATH = str(resolve_path_from_base(MONITOR_CONFIG["llm"]["model_path"], BASE_DIR))
 PORT = MONITOR_CONFIG["server"]["port"]
 
 
