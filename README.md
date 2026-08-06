@@ -20,6 +20,21 @@ python run.py
 
 ---
 
+## 三类任务对话意图
+
+- QUERY：只读取任务事实、状态、判据和异常，不修改状态。
+- CONTROL：改变流程位置或推进方式，包括 `rollback`、`retry`、`force_complete`。
+- WRITE：写入参数或人工覆盖状态事实，包括 `change_parameter`、`override_field`。
+- IRRELEVANT：与任务无关或无法可靠识别的安全出口。
+
+查询水深、坐标、机器人属于 QUERY。修改水深、坐标、机器人元数据不在本轮 WRITE 范围内。
+
+带有“能否、是否、为什么、怎么、会有什么影响、是否已经生效”等询问语气时，即使包含“重试、回退、修改、覆盖”等动作词，也优先作为 QUERY 处理，不会创建待确认动作。
+
+CONTROL 和 WRITE 都需要二次确认。系统返回待确认回复后，用户需发送“确认”才会执行；发送“取消”会清除待确认动作。存在待确认动作时，仍可继续查询任务事实或动作影响，但新的 CONTROL/WRITE 请求不会覆盖原待确认动作。
+
+---
+
 ## 一、正常流程（S1 → S8 全部成功）（测试时evidence_summary应当去掉！）
 
 ### S1：移动至采油树控制面板附近
@@ -173,9 +188,9 @@ curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: app
 
 回退成功后，S5、S6、S7 被重置为 pending，当前子任务变为 S5。然后重新上报 S5、S6 的正确数据，最后 S7 上报 `visual_check_flag=1` 并审核，任务继续完成。
 
-### #（这个场景有问题，应当能修改的是阈值）异常场景4：手动修正
+### 异常场景4：手动修正
 
-### S1 距离误差过大导致失败，通过对话框直接修改实际值恢复
+### S1 距离误差过大导致失败，通过对话框人工覆盖实际状态值恢复
 
 **模拟失败上报**（同场景1）
 
@@ -185,13 +200,19 @@ curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Typ
 
 S1 失败，任务整体 `failed`。
 
-**通过对话框直接修改字段值（模拟用户输入）**
+**通过对话框人工覆盖字段值（WRITE / override_field）**
 
 ```bash
 curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"将距离误差改为0.05米"}'
 ```
 
-系统识别为 `override_field` 动作，直接执行（无需二次确认，因为覆盖字段是确定性操作），修改 `user_overrides`，重新评估判据。由于距离误差变为0.05（满足阈值），S1 硬判据全部满足，若需要人工审核则进入 `waiting_approval`，否则自动完成。
+系统识别为 WRITE / `override_field` 动作，返回待确认回复。再次发送确认消息：
+
+```bash
+curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"确认"}'
+```
+
+确认后系统修改 `user_overrides`，重新评估判据。由于距离误差变为0.05（满足阈值），S1 硬判据全部满足，若需要人工审核则进入 `waiting_approval`，否则自动完成。
 
 此时任务整体状态恢复为 `in_progress`。
 
