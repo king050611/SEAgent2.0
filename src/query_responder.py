@@ -165,7 +165,7 @@ class QueryResponder:
 
 请输出 JSON 格式：
 {{
-    "intent": "query" / "intervention" / "irrelevant",
+    "intent": "query" / "control" / "write" / "irrelevant",
     "target_task_id": "任务ID（如果用户明确指向某个任务，否则为 null）",
     "confidence": 0.0-1.0,
     "reason": "简短说明"
@@ -226,7 +226,7 @@ class QueryResponder:
         local_result = self.process(user_message, task_state)
         if local_result["type"] == "query":
             return local_result
-        elif local_result["type"] == "intervention":
+        elif local_result["type"] in {"control", "write"}:
             action = local_result.get("action")
             if not action:
                 answer = self.generate_reply(
@@ -242,9 +242,10 @@ class QueryResponder:
                 user_message=user_message,
                 raw_intent=local_result.get("raw_intent") or {}
             )
-            answer = self.generate_confirmation_request(user_message, action, task_state)
+            answer = self.generate_confirmation_request(user_message, action, task_state, intent=local_result["type"])
             return {
                 "type": "intervention_pending",
+                "intent": local_result["type"],
                 "answer": answer,
                 "pending_action": action,
                 "result": pending_result,
@@ -285,31 +286,43 @@ class QueryResponder:
         user_message: str,
         action: Dict[str, Any],
         task_state: Dict[str, Any],
+        intent: Optional[str] = None,
     ) -> str:
         """干预执行前，由 LLM 生成二次确认话术。"""
+        if intent == "write":
+            reply_intent = "用户提出了写入请求。请说明将写入的字段或参数、目标子任务、新值和可能触发的重新评估；确认前不会修改任务状态；要求用户回复“确认”或“取消”"
+        elif intent == "control":
+            reply_intent = "用户提出了流程控制请求。请说明将执行的控制动作、目标子任务和对后续步骤的影响；确认前不会修改流程；要求用户回复“确认”或“取消”"
+        else:
+            reply_intent = "用户提出了流程干预。请先说清楚即将执行的修改、可能影响的步骤，并要求用户回复“确认”或“取消”后再执行"
         return self.generate_reply(
-            reply_intent="用户提出了流程干预。请先说清楚即将执行的修改、可能影响的步骤，并要求用户回复“确认”或“取消”后再执行",
+            reply_intent=reply_intent,
             user_message=user_message,
             task_state=task_state,
-            operation_result={"pending_action": action, "requires_user_confirmation": True},
+            operation_result={"pending_action": action, "pending_intent": intent, "requires_user_confirmation": True},
             temperature=0.35,
             max_tokens=420,
         )
 
     def generate_intervention_response(
-        self, user_message: str, intervention_result: Dict[str, Any], task_state: Dict[str, Any]
+        self, user_message: str, intervention_result: Dict[str, Any], task_state: Dict[str, Any], intent: Optional[str] = None
     ) -> str:
         """干预执行后，由 LLM 根据总体意图生成自然回复。"""
         ok = not bool(intervention_result.get("error"))
         if ok:
-            reply_intent = "说明用户已确认，干预已执行成功，概括流程变化和当前下一步"
+            if intent == "write":
+                reply_intent = "说明用户已确认，写入已执行成功，概括实际写入结果、判据是否重新评估、当前子任务和下一步"
+            elif intent == "control":
+                reply_intent = "说明用户已确认，流程控制已执行成功，概括流程变化和当前下一步"
+            else:
+                reply_intent = "说明用户已确认，干预已执行成功，概括流程变化和当前下一步"
         else:
-            reply_intent = "说明用户已确认，但干预未能执行，解释失败原因并给出可操作建议"
+            reply_intent = "说明用户已确认，但流程控制或写入未能执行，解释失败原因并给出可操作建议"
         return self.generate_reply(
             reply_intent=reply_intent,
             user_message=user_message,
             task_state=task_state,
-            operation_result=intervention_result,
+            operation_result={**intervention_result, "intent": intent},
             temperature=0.35,
             max_tokens=420,
         )

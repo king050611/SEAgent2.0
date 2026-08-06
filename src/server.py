@@ -166,6 +166,7 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                 if decision == "confirm":
                     task_manager.clear_pending_intervention(task_id)
                     action = pending.get("action") or {}
+                    pending_intent = pending.get("intent") or (pending.get("raw_intent") or {}).get("intent") or "intervention"
                     intervention_result = task_manager.execute_intervention(task_id, action)
                     latest_state = task_manager.get_task_status(task_id) or task_state
                     answer = query_responder.generate_intervention_response(
@@ -176,37 +177,56 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                             "confirmation_message": user_message,
                         },
                         task_state=latest_state,
+                        intent=pending_intent,
                     )
                     return jsonify({
                         "type": "intervention",
+                        "intent": pending_intent,
                         "answer": answer,
                         "result": intervention_result,
                         "refresh_required": True,
                     })
 
                 if decision == "cancel":
+                    pending_intent = pending.get("intent") or (pending.get("raw_intent") or {}).get("intent") or "intervention"
                     clear_result = task_manager.clear_pending_intervention(task_id)
                     latest_state = task_manager.get_task_status(task_id) or task_state
                     answer = query_responder.generate_reply(
-                        reply_intent="用户取消了待确认的流程干预。请说明没有修改任务状态，并提示可继续查询或重新发起干预",
+                        reply_intent="用户取消了待确认的流程控制或写入请求。请说明没有修改任务状态，并提示可继续查询或重新发起请求",
                         user_message=user_message,
                         task_state=latest_state,
                         operation_result={"cancelled_pending_intervention": clear_result.get("pending_intervention")},
                     )
                     return jsonify({
                         "type": "intervention_cancelled",
+                        "intent": pending_intent,
                         "answer": answer,
                         "refresh_required": False,
                     })
 
+                result = query_responder.process(user_message, task_state)
+                if result["type"] == "query":
+                    return jsonify({
+                        "type": "query",
+                        "intent": "query",
+                        "answer": result["answer"],
+                        "pending_action": pending.get("action"),
+                        "refresh_required": False,
+                    })
+
+                pending_intent = pending.get("intent") or (pending.get("raw_intent") or {}).get("intent") or "intervention"
                 answer = query_responder.generate_reply(
-                    reply_intent="当前存在一个待确认的流程干预，用户本轮没有明确确认或取消。请提醒用户必须先回复“确认”或“取消”，不要执行任何修改",
+                    reply_intent=(
+                        "当前已有一个待确认的流程控制或写入请求。用户本轮提出了新的流程控制或写入请求，"
+                        "请说明不会覆盖原待确认动作，并要求用户先回复“确认”或“取消”。"
+                    ),
                     user_message=user_message,
                     task_state=task_state,
-                    operation_result={"pending_intervention": pending, "confirmation_decision": decision_info},
+                    operation_result={"pending_intervention": pending, "new_request": result, "confirmation_decision": decision_info},
                 )
                 return jsonify({
                     "type": "intervention_pending",
+                    "intent": pending_intent,
                     "answer": answer,
                     "pending_action": pending.get("action"),
                     "refresh_required": False,
@@ -215,30 +235,31 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
             result = query_responder.process(user_message, task_state)
 
             if result["type"] == "irrelevant":
-                return jsonify({"type": "irrelevant", "answer": result["answer"], "refresh_required": False})
+                return jsonify({"type": "irrelevant", "intent": result.get("intent", "irrelevant"), "answer": result["answer"], "refresh_required": False})
             if result["type"] == "query":
-                return jsonify({"type": "query", "answer": result["answer"], "refresh_required": False})
-            if result["type"] == "intervention":
+                return jsonify({"type": "query", "intent": "query", "answer": result["answer"], "refresh_required": False})
+            if result["type"] in {"control", "write"}:
                 action = result.get("action")
                 if not action:
                     answer = query_responder.generate_reply(
-                        reply_intent="说明干预动作解析失败，请用户补充更明确的动作、参数或子任务",
+                        reply_intent="说明流程控制或写入动作解析失败，请用户补充更明确的动作、参数、字段值或子任务",
                         user_message=user_message,
                         task_state=task_state,
                         operation_result={"error": "missing_action"},
                     )
-                    return jsonify({"type": "irrelevant", "answer": answer, "refresh_required": False})
+                    return jsonify({"type": "irrelevant", "intent": result.get("intent", "irrelevant"), "answer": answer, "refresh_required": False})
 
                 pending_result = task_manager.set_pending_intervention(
                     task_id=task_id,
                     action=action,
                     user_message=user_message,
-                    raw_intent=result.get("raw_intent") or {},
+                    raw_intent=result.get("raw_intent") or {"intent": result["type"]},
                 )
                 latest_state = task_manager.get_task_status(task_id) or task_state
-                answer = query_responder.generate_confirmation_request(user_message, action, latest_state)
+                answer = query_responder.generate_confirmation_request(user_message, action, latest_state, intent=result["type"])
                 return jsonify({
                     "type": "intervention_pending",
+                    "intent": result["type"],
                     "answer": answer,
                     "pending_action": action,
                     "result": pending_result,
