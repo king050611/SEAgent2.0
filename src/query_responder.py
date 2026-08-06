@@ -21,8 +21,16 @@ logger = logging.getLogger(__name__)
 
 
 class QueryResponder:
-    VALID_INTENTS = {"query", "intervention", "irrelevant"}
-    VALID_ACTIONS = {"rollback", "retry", "change_parameter", "force_complete", "override_field"}
+    VALID_INTENTS = {"query", "control", "write", "irrelevant"}
+    CONTROL_ACTIONS = {"rollback", "retry", "force_complete"}
+    WRITE_ACTIONS = {"change_parameter", "override_field"}
+    VALID_ACTIONS = CONTROL_ACTIONS | WRITE_ACTIONS
+    QUERY_TOPICS = {
+        "task_identity", "time", "location", "task_details", "equipment", "conditions",
+        "task_status", "subtask_status", "criteria", "anomaly", "pending_action",
+    }
+    WRITABLE_PARAMETERS = {"timeout_seconds", "max_retries"}
+    MIN_MUTATION_CONFIDENCE = 0.75
     VALID_CONFIRM_DECISIONS = {"confirm", "cancel", "other"}
 
     def __init__(self, llm: LLMClient, task_manager=None):
@@ -38,7 +46,8 @@ class QueryResponder:
         统一处理入口（局部模式）。
         返回：
         - {"type":"query", "answer": str}
-        - {"type":"intervention", "action": dict}
+        - {"type":"control", "action": dict}
+        - {"type":"write", "action": dict}
         - {"type":"irrelevant", "answer": str}
         """
         intent_info = self._classify_intent(user_message, task_state)
@@ -47,6 +56,11 @@ class QueryResponder:
         if intent == "query":
             # ############# anomaly advice 接入开始 #############
             operation_result = self._build_query_operation_result(task_state, user_message=user_message)
+            query_topics = intent_info.get("query_topics", [])
+            operation_result.update({
+                "query_topics": query_topics,
+                "query_facts": self._build_query_facts(task_state, query_topics),
+            })
             reply_intent = (
                 "根据用户问题和本轮任务事实回答。"
                 "回答失败、卡点或处理建议时，先说明失败现象和完成条件未满足的含义；失败不等于机器人内部异常。"
@@ -83,6 +97,7 @@ class QueryResponder:
             # ############# anomaly advice 接入结束 #############
             return {
                 "type": "query",
+                "intent": "query",
                 "answer": self.generate_reply(
                     reply_intent=reply_intent,
                     user_message=user_message,
@@ -93,22 +108,27 @@ class QueryResponder:
                 ),
             }
 
-        if intent == "intervention":
+        if intent in {"control", "write"}:
             action = self._normalize_action(intent_info.get("action"), task_state)
             if not action:
                 return {
                     "type": "irrelevant",
+                    "intent": intent,
                     "answer": self.generate_reply(
-                        reply_intent="说明用户有干预意图，但指令缺少必要信息，请用户补充具体动作或子任务",
+                        reply_intent=(
+                            "说明用户的请求已被识别为流程控制或写入请求，但当前指令缺少必要信息、"
+                            "动作与意图不匹配或超出可写范围，因此不会创建待确认动作。请用户拆分指令或补充目标、字段和值。"
+                        ),
                         user_message=user_message,
                         task_state=task_state,
                         operation_result={"error": "invalid_or_incomplete_intervention_action", "raw_intent": intent_info},
                     ),
                 }
-            return {"type": "intervention", "action": action, "raw_intent": intent_info}
+            return {"type": intent, "intent": intent, "action": action, "raw_intent": intent_info}
 
         return {
             "type": "irrelevant",
+            "intent": "irrelevant",
             "answer": self.generate_reply(
                 reply_intent=(
                     "用户问题与当前任务无关。请采用简短、友好的拒答方式："
@@ -833,26 +853,22 @@ class QueryResponder:
         message = (user_message or "").strip().lower()
         if not message:
             return False
-        intervention_words = (
-            "回退", "重试", "修改", "改成", "调整", "强制", "人工完成",
-            "确认", "取消", "rollback", "retry", "change", "override",
-        )
-        if any(word in message for word in intervention_words):
-            return False
         query_words = (
             "当前任务状态", "当前状态", "任务状态", "状态是什么", "现在状态",
             "进度", "当前进展", "推进到", "到哪", "当前步骤", "当前子任务",
             "卡点", "卡在哪", "为什么", "原因", "失败", "异常", "异常建议",
             "判据", "软判据", "硬判据", "下一步", "建议", "怎么办",
+            "水深", "油田", "坐标", "经纬度", "机器人", "载荷", "支持船",
+            "能否", "是否", "能", "可以", "可不可以", "吗", "怎么", "会有什么影响", "影响", "生效", "安全吗",
             "status", "progress", "state", "current",
         )
         return any(word in message for word in query_words)
 
+    def _looks_like_query(self, user_message: str) -> bool:
+        return self._is_obvious_query(user_message)
+
     def _classify_intent(self, user_message: str, task_state: Dict[str, Any]) -> Dict[str, Any]:
         """调用 LLM 判断意图。失败时降级为 irrelevant，避免误操作任务。"""
-        if self._is_obvious_query(user_message):
-            return {"intent": "query", "confidence": 1.0, "source": "deterministic_query_guard"}
-
         summary = self._task_summary(task_state)
         available_subtasks = [
             {"id": st.get("subtask_id"), "name": st.get("name"), "status": st.get("status")}
@@ -873,18 +889,147 @@ class QueryResponder:
             return {"intent": "irrelevant", "confidence": 0.0}
         if result.get("intent") not in self.VALID_INTENTS:
             return {"intent": "irrelevant", "confidence": 0.0}
-        return result
+        return self._normalize_intent_info(result, task_state, user_message)
+
+    def _normalize_query_topics(self, raw_topics: Any) -> List[str]:
+        if isinstance(raw_topics, str):
+            raw_topics = [raw_topics]
+        if not isinstance(raw_topics, list):
+            raw_topics = []
+        topics = []
+        for topic in raw_topics:
+            if topic in self.QUERY_TOPICS and topic not in topics:
+                topics.append(topic)
+        return topics or ["task_status"]
+
+    def _query_topics_from_message(self, user_message: str) -> List[str]:
+        message = user_message or ""
+        if any(word in message for word in ("能重试", "可以重试", "能回退", "可以回退", "会有什么影响", "是否生效", "有没有生效")):
+            return ["pending_action"]
+        topics: List[str] = []
+        keyword_topics = [
+            (("任务编号", "任务类型", "优先级", "identity"), "task_identity"),
+            (("时间", "开始", "结束", "time"), "time"),
+            (("水深", "油田", "坐标", "经纬度", "location"), "location"),
+            (("采油树", "井口", "孔位", "目标", "详情"), "task_details"),
+            (("机器人", "载荷", "支持船", "设备", "equipment"), "equipment"),
+            (("条件", "海况", "能见度", "conditions"), "conditions"),
+            (("状态", "进度", "当前", "推进"), "task_status"),
+            (("子任务", "步骤", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"), "subtask_status"),
+            (("判据", "硬判据", "软判据", "阈值", "criteria"), "criteria"),
+            (("异常", "失败", "建议", "卡点"), "anomaly"),
+            (("确认", "取消", "重试", "回退", "修改", "影响", "生效", "能否", "是否", "pending"), "pending_action"),
+        ]
+        for keywords, topic in keyword_topics:
+            if any(keyword in message for keyword in keywords) and topic not in topics:
+                topics.append(topic)
+        return topics or ["task_status"]
+
+    def _clarification_result(self, raw: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        return {
+            "intent": "irrelevant",
+            "query_topics": [],
+            "action": None,
+            "needs_clarification": True,
+            "confidence": raw.get("confidence", 0.0) if isinstance(raw, dict) else 0.0,
+            "reason": reason,
+            "raw_intent": raw,
+        }
+
+    def _normalize_intent_info(self, intent_info: Dict[str, Any], task_state: Dict[str, Any], user_message: str) -> Dict[str, Any]:
+        raw = dict(intent_info or {})
+        intent = raw.get("intent")
+        action = raw.get("action") if isinstance(raw.get("action"), dict) else None
+
+        if self._looks_like_query(user_message):
+            return {
+                "intent": "query",
+                "target_task_id": raw.get("target_task_id"),
+                "query_topics": self._query_topics_from_message(user_message),
+                "action": None,
+                "needs_clarification": False,
+                "confidence": max(float(raw.get("confidence") or 0.0), 1.0),
+                "reason": "question_form_or_query_keywords",
+            }
+
+        if intent == "query":
+            return {
+                "intent": "query",
+                "target_task_id": raw.get("target_task_id"),
+                "query_topics": self._normalize_query_topics(raw.get("query_topics")),
+                "action": None,
+                "needs_clarification": bool(raw.get("needs_clarification", False)),
+                "confidence": raw.get("confidence", 0.0),
+                "reason": raw.get("reason", ""),
+            }
+
+        if intent == "irrelevant":
+            return {
+                "intent": "irrelevant",
+                "target_task_id": raw.get("target_task_id"),
+                "query_topics": [],
+                "action": None,
+                "needs_clarification": bool(raw.get("needs_clarification", False)),
+                "confidence": raw.get("confidence", 0.0),
+                "reason": raw.get("reason", ""),
+            }
+
+        if intent in {"control", "write"}:
+            confidence = float(raw.get("confidence") or 0.0)
+            if confidence < self.MIN_MUTATION_CONFIDENCE:
+                return self._clarification_result(raw, "mutation_confidence_too_low")
+            if not action:
+                return self._clarification_result(raw, "missing_action")
+            action_type = action.get("action")
+            if intent == "control":
+                if action_type not in self.CONTROL_ACTIONS:
+                    return self._clarification_result(raw, "control_intent_cannot_carry_write_action")
+                normalized = self._validate_control_action(action, task_state)
+            else:
+                if action_type not in self.WRITE_ACTIONS:
+                    return self._clarification_result(raw, "write_intent_cannot_carry_control_action")
+                normalized = self._validate_write_action(action, task_state)
+            if not normalized:
+                return self._clarification_result(raw, "invalid_or_incomplete_action")
+            return {
+                "intent": intent,
+                "target_task_id": raw.get("target_task_id"),
+                "query_topics": [],
+                "action": normalized,
+                "needs_clarification": False,
+                "confidence": confidence,
+                "reason": raw.get("reason", ""),
+            }
+
+        return {"intent": "irrelevant", "confidence": 0.0}
 
     def _normalize_action(self, action: Any, task_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """对 LLM 输出动作做最小结构校验，不做自然语言规则解析。"""
         if not isinstance(action, dict):
             return None
         action_type = action.get("action")
-        if action_type not in self.VALID_ACTIONS:
-            return None
+        if action_type in self.CONTROL_ACTIONS:
+            return self._validate_control_action(action, task_state)
+        if action_type in self.WRITE_ACTIONS:
+            return self._validate_write_action(action, task_state)
+        return None
 
+    def _valid_subtask_ids(self, task_state: Dict[str, Any]) -> set:
+        return {st.get("subtask_id") for st in (task_state or {}).get("subtasks", [])}
+
+    def _coerce_action_value(self, value: Any) -> Any:
+        if isinstance(value, str):
+            text = value.strip()
+            if text.replace(".", "", 1).isdigit():
+                return float(text) if "." in text else int(text)
+            if text.lower() in ("true", "false"):
+                return text.lower() == "true"
+        return value
+
+    def _validate_control_action(self, action: Dict[str, Any], task_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         current_subtask = task_state.get("current_subtask")
-        valid_subtasks = {st.get("subtask_id") for st in task_state.get("subtasks", [])}
+        valid_subtasks = self._valid_subtask_ids(task_state)
+        action_type = action.get("action")
 
         if action_type == "rollback":
             target = action.get("to_subtask") or current_subtask
@@ -900,36 +1045,119 @@ class QueryResponder:
                 return None
             return {"action": action_type, "subtask_id": subtask_id}
 
+        return None
+
+    def _validate_write_action(self, action: Dict[str, Any], task_state: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        current_subtask = task_state.get("current_subtask")
+        valid_subtasks = self._valid_subtask_ids(task_state)
+        action_type = action.get("action")
+
         if action_type == "change_parameter":
             parameter = action.get("parameter")
             value = action.get("value")
             subtask_id = action.get("subtask_id") or current_subtask
-            if not parameter or value is None or subtask_id not in valid_subtasks:
+            if parameter not in self.WRITABLE_PARAMETERS or value is None or subtask_id not in valid_subtasks:
                 return None
-            # 尝试转换 value 类型
-            if isinstance(value, str):
-                if value.replace('.', '', 1).isdigit():
-                    value = float(value)
-                elif value.lower() in ("true", "false"):
-                    value = value.lower() == "true"
-            return {"action": "change_parameter", "subtask_id": subtask_id, "parameter": parameter, "value": value}
+            return {
+                "action": "change_parameter",
+                "subtask_id": subtask_id,
+                "parameter": parameter,
+                "value": self._coerce_action_value(value),
+            }
 
-        # 新增：override_field 动作校验
         if action_type == "override_field":
             field = action.get("field")
             value = action.get("value")
             subtask_id = action.get("subtask_id") or current_subtask
             if not field or value is None or subtask_id not in valid_subtasks:
                 return None
-            # 类型转换
-            if isinstance(value, str):
-                if value.replace('.', '', 1).isdigit():
-                    value = float(value)
-                elif value.lower() in ("true", "false"):
-                    value = value.lower() == "true"
-            return {"action": "override_field", "subtask_id": subtask_id, "field": field, "value": value}
+            if field not in self._allowed_override_fields(task_state, subtask_id):
+                return None
+            return {
+                "action": "override_field",
+                "subtask_id": subtask_id,
+                "field": field,
+                "value": self._coerce_action_value(value),
+            }
 
         return None
+
+    def _allowed_override_fields(self, task_state: Dict[str, Any], subtask_id: str) -> set:
+        subtask = self._find_subtask(task_state, subtask_id)
+        criteria_ref = subtask.get("criteria_ref")
+        criteria_def = self.criteria_config.get(criteria_ref) if criteria_ref else None
+        if not isinstance(criteria_def, dict):
+            return set()
+        return set((criteria_def.get("hard") or {}).keys()) | set((criteria_def.get("soft") or {}).keys())
+
+    def _build_query_facts(self, task_state: Dict[str, Any], query_topics: List[str]) -> Dict[str, Any]:
+        topics = self._normalize_query_topics(query_topics)
+        metadata = dict((task_state or {}).get("metadata") or {})
+        metadata.pop("monitoring_runtime_example", None)
+        task_details = ((metadata.get("task") or {}).get("details") or {})
+        current_subtask = self._find_subtask(task_state, (task_state or {}).get("current_subtask"))
+        facts: Dict[str, Any] = {}
+
+        if "task_identity" in topics:
+            facts["task_identity"] = {
+                "task_id": (task_state or {}).get("task_id"),
+                "intent_id": metadata.get("intent_id"),
+                "task_type": metadata.get("task_type"),
+                "priority": metadata.get("priority"),
+                "description": (task_state or {}).get("description"),
+            }
+        if "time" in topics:
+            facts["time"] = metadata.get("time") or {}
+        if "location" in topics:
+            facts["location"] = metadata.get("location") or {}
+        if "task_details" in topics:
+            facts["task_details"] = {
+                "wellhead_id": task_details.get("wellhead_id"),
+                "target": task_details.get("target") or {},
+                "christmas_tree_type": task_details.get("christmas_tree_type"),
+                "hole_positions": task_details.get("hole_positions") or [],
+            }
+        if "equipment" in topics:
+            facts["equipment"] = metadata.get("equipment") or {}
+        if "conditions" in topics:
+            facts["conditions"] = metadata.get("conditions") or {}
+        if "task_status" in topics:
+            facts["task_status"] = {
+                "overall_status": (task_state or {}).get("overall_status"),
+                "current_subtask": (task_state or {}).get("current_subtask"),
+            }
+        if "subtask_status" in topics:
+            facts["subtask_status"] = [
+                {
+                    "subtask_id": st.get("subtask_id"),
+                    "name": st.get("name"),
+                    "status": st.get("status"),
+                    "retry_count": st.get("retry_count", 0),
+                }
+                for st in (task_state or {}).get("subtasks", [])
+            ]
+        if "criteria" in topics:
+            facts["criteria"] = {
+                "current_subtask": {
+                    "subtask_id": current_subtask.get("subtask_id"),
+                    "hard_met": (current_subtask.get("completion_criteria") or {}).get("hard_met"),
+                    "soft_met": (current_subtask.get("completion_criteria") or {}).get("soft_met"),
+                    "hard_unmet_details": (current_subtask.get("completion_criteria") or {}).get("hard_unmet_details", []),
+                    "soft_unmet_details": (current_subtask.get("completion_criteria") or {}).get("soft_unmet_details", []),
+                    "hard_details": (current_subtask.get("completion_criteria") or {}).get("hard_details", {}),
+                    "soft_details": (current_subtask.get("completion_criteria") or {}).get("soft_details", {}),
+                }
+            }
+        if "anomaly" in topics:
+            facts["anomaly"] = {
+                "anomaly_state": (task_state or {}).get("anomaly_state") or {},
+                "latest_anomaly_advice": (task_state or {}).get("latest_anomaly_advice"),
+                "latest_anomaly_context": (task_state or {}).get("latest_anomaly_context"),
+            }
+        if "pending_action" in topics:
+            facts["pending_action"] = (task_state or {}).get("pending_intervention")
+
+        return facts
 
     def _task_summary(self, task_state: Dict[str, Any]) -> Dict[str, Any]:
         return {

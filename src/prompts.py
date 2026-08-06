@@ -22,21 +22,26 @@ CLASSIFY_PROMPT = """\
 
 输出规则：
 1. 只能输出一个 JSON 对象，不能输出解释、Markdown 或代码块。
-2. intent 只能是 query、intervention、irrelevant 三者之一。
-3. 用户想了解任务进度、当前卡点、判据、下一步、失败原因、异常处理建议、询问干预结果/影响/当前状态时：
-   {{"intent":"query","confidence":0.0到1.0}}
-4. 用户明确要求改变流程状态或参数时：
-   {{"intent":"intervention","confidence":0.0到1.0,"action":{{...}}}}
-5. 用户消息与当前任务无关时：
-   {{"intent":"irrelevant","confidence":0.0到1.0}}
+2. intent 只能是 query、control、write、irrelevant 四者之一。
+3. 统一输出字段：
+   {{"intent":"query|control|write|irrelevant","target_task_id":null,"query_topics":[],"action":null,"needs_clarification":false,"confidence":0.0到1.0,"reason":"简短依据"}}
+4. QUERY：用户想了解任务事实、任务时间、油田、水深、坐标、机器人、载荷、支持船、任务进度、当前卡点、判据、下一步、失败原因、异常处理建议、待确认动作影响、干预是否生效或当前状态时。
+5. CONTROL：用户明确要求改变流程位置或推进方式时，只能携带 rollback、retry、force_complete。
+6. WRITE：用户明确指定写入参数、字段和值时，只能携带 change_parameter、override_field。
+7. IRRELEVANT：用户消息与当前任务无关，或无法可靠识别为前三类时。
 
-干预 action 必须使用以下格式，且字段名必须完全匹配：
+query_topics 可选值：
+task_identity, time, location, task_details, equipment, conditions,
+task_status, subtask_status, criteria, anomaly, pending_action
+
+CONTROL action 必须使用以下格式，且字段名必须完全匹配：
 - 回退到某子任务：{{"action":"rollback","to_subtask":"S2"}}
 - 重试当前或指定子任务：{{"action":"retry","subtask_id":"S4"}}
-- 修改参数：{{"action":"change_parameter","subtask_id":"S2","parameter":"hole_id","value":"port_3"}}
 - 人工完成/强制通过当前子任务：{{"action":"force_complete","subtask_id":"S1"}}
-- 调整判据容差（在原准入标准基础上放宽）：{{"action":"adjust_criterion_tolerance","subtask_id":"S1","criterion":"distance_error_max","delta":0.05,"mode":"relax"}}
-- **覆盖状态字段（仅用于人工确认实际状态值）**：{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}
+
+WRITE action 必须使用以下格式，且字段名必须完全匹配：
+- 修改可写参数：{{"action":"change_parameter","subtask_id":"S2","parameter":"timeout_seconds","value":60}}
+- 覆盖状态字段（仅用于人工确认实际状态值）：{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}
 
 可用字段名（判据中定义的键）：
 distance_error_max, angle_error_max, speed_stable_frames, min_grid_count, panel_visible_flag,
@@ -47,15 +52,20 @@ arm_reset_flag, return_position_error_max
 约束：
 - 不要臆造不存在的子任务编号或字段名。
 - 不要把闲聊、模型身份、天气、新闻、代码问题判断为任务查询。
-- 仅询问干预是否生效、影响或当前状态时，判断为 query；只有明确要求执行新的干预动作时，才判断为 intervention。
-- 对缺少目标子任务的回退/重试请求，可以判断为 intervention，但 action 中不要填充 to_subtask 或 subtask_id。
+- 询问语气优先判断为 query，例如“能否、是否、为什么、怎么、会有什么影响、是否已经生效、安全吗”。
+- 动作词不等于动作意图；只有明确要求执行新的流程动作时才判断为 control，只有明确指定写入值时才判断为 write。
+- 对缺少目标子任务的回退/重试请求，可以判断为 control，但 action 中不要填充 to_subtask 或 subtask_id。
+- 同一消息同时包含 CONTROL 和 WRITE 时，needs_clarification 必须为 true，不要猜测执行顺序。
 示例：
-用户："回退到S2" -> {{"intent":"intervention","confidence":0.95,"action":{{"action":"rollback","to_subtask":"S2"}}}}
-用户："重试S4" -> {{"intent":"intervention","confidence":0.92,"action":{{"action":"retry","subtask_id":"S4"}}}}
-用户："把S2的孔位改成port_1" -> {{"intent":"intervention","confidence":0.88,"action":{{"action":"change_parameter","subtask_id":"S2","parameter":"hole_id","value":"port_1"}}}}
-用户："强制完成S1" -> {{"intent":"intervention","confidence":0.90,"action":{{"action":"force_complete","subtask_id":"S1"}}}}
-用户："把距离误差改成0.05米" -> {{"intent":"intervention","confidence":0.91,"action":{{"action":"adjust_criterion_tolerance","subtask_id":"S1","criterion":"distance_error_max","delta":0.05,"mode":"relax"}}}}
-用户："人工确认当前距离误差是0.05米" -> {{"intent":"intervention","confidence":0.91,"action":{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}}}
+用户："当前水深是多少" -> {{"intent":"query","query_topics":["location"],"action":null,"needs_clarification":false,"confidence":0.98}}
+用户："S2 能重试吗" -> {{"intent":"query","query_topics":["pending_action"],"action":null,"needs_clarification":false,"confidence":0.96}}
+用户："重试S4会有什么影响" -> {{"intent":"query","query_topics":["pending_action","subtask_status"],"action":null,"needs_clarification":false,"confidence":0.95}}
+用户："回退到S2" -> {{"intent":"control","query_topics":[],"confidence":0.95,"action":{{"action":"rollback","to_subtask":"S2"}}}}
+用户："重试S4" -> {{"intent":"control","query_topics":[],"confidence":0.92,"action":{{"action":"retry","subtask_id":"S4"}}}}
+用户："强制完成S1" -> {{"intent":"control","query_topics":[],"confidence":0.90,"action":{{"action":"force_complete","subtask_id":"S1"}}}}
+用户："把S2的超时时间改成60秒" -> {{"intent":"write","query_topics":[],"confidence":0.88,"action":{{"action":"change_parameter","subtask_id":"S2","parameter":"timeout_seconds","value":60}}}}
+用户："人工确认当前距离误差是0.05米" -> {{"intent":"write","query_topics":[],"confidence":0.91,"action":{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}}}
+用户："先把距离改成0.05，再重试S1" -> {{"intent":"irrelevant","query_topics":[],"action":null,"needs_clarification":true,"confidence":0.95,"reason":"同一消息同时包含WRITE和CONTROL，请拆分为两条指令"}}
 """
 
 CONFIRM_PROMPT = """\
