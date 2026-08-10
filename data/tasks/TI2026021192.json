@@ -3,7 +3,7 @@
   "description": "执行采油树控制面板插头插入任务",
   "created_at": 1781775502.7322316,
   "overall_status": "in_progress",
-  "current_subtask": "S2",
+  "current_subtask": "S3",
   "subtasks": [
     {
       "name": "移动至采油树控制面板附近",
@@ -22,12 +22,12 @@
       "status": "completed",
       "retry_count": 0,
       "completion_criteria": {
-        "hard_met": true,
+        "hard_met": false,
         "hard_details": {
           "distance_error_max": {
             "expected": 0.1,
-            "actual": 0.05,
-            "met": true
+            "actual": 0.15,
+            "met": false
           },
           "angle_error_max": {
             "expected": 10.0,
@@ -40,7 +40,9 @@
             "met": true
           }
         },
-        "hard_unmet_details": [],
+        "hard_unmet_details": [
+          "distance_error_max"
+        ],
         "soft_met": true,
         "soft_details": {
           "min_grid_count": {
@@ -56,11 +58,12 @@
         },
         "soft_unmet_details": [],
         "require_approval": true,
-        "all_met": true
+        "all_met": false,
+        "manual_forced": true
       },
-      "evidence_summary": "所有判据满足; 已记录状态字段: angle_error_max, distance_error_max, min_grid_count, panel_visible_flag, plug_stable_flag, speed_stable_frames",
+      "evidence_summary": "硬判据不满足: distance_error_max; 已记录状态字段: angle_error_max, distance_error_max, min_grid_count, panel_visible_flag, plug_stable_flag, speed_stable_frames\n[人工完成] 用户确认该子任务完成。",
       "latest_state": {
-        "distance_error_max": 0.05,
+        "distance_error_max": 0.15,
         "angle_error_max": 5.0,
         "speed_stable_frames": 5,
         "min_grid_count": 15,
@@ -84,10 +87,12 @@
         "hole_conflict": "hole_conflict"
       },
       "subtask_id": "S2",
-      "status": "in_progress",
+      "status": "completed",
       "retry_count": 0,
-      "completion_criteria": {},
-      "evidence_summary": "",
+      "completion_criteria": {
+        "manual_forced": true
+      },
+      "evidence_summary": "\n[人工完成] 用户确认该子任务完成。",
       "latest_state": {}
     },
     {
@@ -104,7 +109,7 @@
         "path_not_found": "manual_intervention"
       },
       "subtask_id": "S3",
-      "status": "pending",
+      "status": "in_progress",
       "retry_count": 0,
       "completion_criteria": {},
       "evidence_summary": "",
