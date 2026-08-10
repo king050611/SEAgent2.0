@@ -143,6 +143,19 @@ class QueryResponderIntentProtocolTest(unittest.TestCase):
 
         self.assertEqual(result["query_fields"], ["water_depth"])
 
+    def test_classify_prompt_includes_available_criteria_semantics(self):
+        llm = FakeLLM({"intent": "irrelevant", "confidence": 0.1})
+        responder = QueryResponder(llm)
+
+        responder._classify_intent("修改最大误差距离为0.15", sample_task_state())
+
+        prompt = llm.extract_calls[0][0]["content"]
+        self.assertIn("当前可用判据及语义", prompt)
+        self.assertIn('"key": "distance_error_max"', prompt)
+        self.assertIn('"name": "距离误差"', prompt)
+        self.assertIn('"kind": "hard"', prompt)
+        self.assertIn('"current_value": 0.1', prompt)
+
     def test_control_and_write_actions_are_separated(self):
         control = QueryResponder(FakeLLM({"intent": "control", "confidence": 0.95, "action": {"action": "rollback", "to_subtask": "S1"}}))
         write = QueryResponder(FakeLLM({"intent": "write", "confidence": 0.95, "action": {"action": "override_field", "subtask_id": "S1", "field": "distance_error_max", "value": 0.05}}))

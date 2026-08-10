@@ -951,6 +951,7 @@ class QueryResponder:
             task_summary=json.dumps(summary, ensure_ascii=False),
             available_subtasks=json.dumps(available_subtasks, ensure_ascii=False),
             available_basic_fields=json.dumps(self._available_basic_fields(task_state), ensure_ascii=False),
+            available_criteria=json.dumps(self._available_criteria_for_prompt(task_state), ensure_ascii=False),
         )
         result = self._safe_extract_json(
             [{"role": "user", "content": prompt}],
@@ -1209,6 +1210,37 @@ class QueryResponder:
                 continue
             normalized.append({"key": str(item.get("key")), "label": str(item.get("label") or item.get("key"))})
         return normalized or [dict(item) for item in self.BASIC_INFO_FIELDS]
+
+    def _available_criteria_for_prompt(self, task_state: Dict[str, Any]) -> List[Dict[str, Any]]:
+        criteria_items: List[Dict[str, Any]] = []
+        for subtask in (task_state or {}).get("subtasks", []):
+            if not isinstance(subtask, dict):
+                continue
+            subtask_id = subtask.get("subtask_id")
+            criteria_ref = subtask.get("criteria_ref")
+            criteria_def = self.criteria_config.get(criteria_ref) if criteria_ref else None
+            if not subtask_id or not isinstance(criteria_def, dict):
+                continue
+
+            explanations = criteria_def.get("explanations") or {}
+            for kind in ("hard", "soft"):
+                criteria_group = criteria_def.get(kind) or {}
+                if not isinstance(criteria_group, dict):
+                    continue
+                for key, current_value in criteria_group.items():
+                    explanation = explanations.get(key) if isinstance(explanations, dict) else None
+                    if not isinstance(explanation, dict):
+                        explanation = {}
+                    criteria_items.append({
+                        "subtask_id": subtask_id,
+                        "subtask_name": subtask.get("name"),
+                        "key": key,
+                        "name": explanation.get("name") or key,
+                        "kind": kind,
+                        "current_value": current_value,
+                        "meaning": explanation.get("meaning") or explanation.get("unmet_meaning") or "",
+                    })
+        return criteria_items
 
     def _basic_info_source(self, task_state: Dict[str, Any]) -> Dict[str, Any]:
         task_state = task_state or {}

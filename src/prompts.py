@@ -23,6 +23,9 @@ CLASSIFY_PROMPT = """\
 可查询基础信息字段：
 {available_basic_fields}
 
+当前可用判据及语义：
+{available_criteria}
+
 输出规则：
 1. 只能输出一个 JSON 对象，不能输出解释、Markdown 或代码块。
 2. intent 只能是 query、control、write、irrelevant 四者之一。
@@ -30,7 +33,7 @@ CLASSIFY_PROMPT = """\
    {{"intent":"query|control|write|irrelevant","target_task_id":null,"query_topics":[],"query_fields":[],"query_all_basic_info":false,"action":null,"needs_clarification":false,"confidence":0.0到1.0,"reason":"简短依据"}}
 4. QUERY：用户想了解任务基础信息、任务进度、当前卡点、判据、下一步、失败原因、异常处理建议、待确认动作影响、干预是否生效或当前状态时。
 5. CONTROL：用户明确要求改变流程位置或推进方式时，只能携带 rollback、retry、force_complete。
-6. WRITE：用户明确指定写入参数、字段和值时，只能携带 change_parameter、override_field。
+6. WRITE：用户明确要求修改任务参数、完成判据规则、判据阈值，或者明确要求人工确认/修正当前实际状态值时，判断为 write。只能携带 change_parameter、override_field。
 7. IRRELEVANT：用户消息与当前任务无关，或无法可靠识别为前三类时。
 
 query_topics 只用于运行时查询，可选值：
@@ -47,11 +50,25 @@ WRITE action 必须使用以下格式，且字段名必须完全匹配：
 - 修改可写参数：{{"action":"change_parameter","subtask_id":"S2","parameter":"timeout_seconds","value":60}}
 - 覆盖状态字段（仅用于人工确认实际状态值）：{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}
 
-可用字段名（判据中定义的键）：
-distance_error_max, angle_error_max, speed_stable_frames, min_grid_count, panel_visible_flag,
-slot_pose_delta_max, plug_pose_delta_max, slot_stable_flag, plug_stable_flag,
-ik_valid_flag, grasp_done_flag, insert_done_flag, visual_check_flag,
-arm_reset_flag, return_position_error_max
+WRITE 必须首先判断用户想修改的对象属于哪一类：
+A. change_parameter 用于修改“规则”：
+- 任务配置参数
+- 判据阈值
+- 允许范围
+- 上限/下限
+- 参数设定值
+当用户表达“修改、调整、设置、放宽、收紧”某个阈值、最大值、最小值、允许范围或参数时，使用 change_parameter。
+
+B. override_field 用于修改“事实”：
+- 当前实际状态
+- 当前观测结果
+- 人工确认值
+- 传感器/外部状态修正值
+当用户表达“当前实际为、人工确认实际为、修正当前状态为、实际测得为”等含义时，使用 override_field。
+
+必须先判断用户修改的是“规则”还是“事实”，不得仅根据字段名称决定 action。
+用户不需要使用内部字段名。用户可能使用中文名称、近义表达、工程表达或口语；你必须根据“当前可用判据及语义”的 key、name、meaning 和所属子任务，将用户描述映射到规范 key。
+例如，“最大距离误差”“最大误差距离”“允许的距离偏差”“距离误差上限”在语义一致时，都可以映射到 distance_error_max。
 
 约束：
 - 不要臆造不存在的子任务编号或字段名。
@@ -70,7 +87,11 @@ arm_reset_flag, return_position_error_max
 用户："重试S4" -> {{"intent":"control","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.92,"action":{{"action":"retry","subtask_id":"S4"}}}}
 用户："强制完成S1" -> {{"intent":"control","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.90,"action":{{"action":"force_complete","subtask_id":"S1"}}}}
 用户："把S2的超时时间改成60秒" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.88,"action":{{"action":"change_parameter","subtask_id":"S2","parameter":"timeout_seconds","value":60}}}}
-用户："人工确认当前距离误差是0.05米" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.91,"action":{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}}}
+用户："修改最大误差距离为0.15" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.95,"action":{{"action":"change_parameter","subtask_id":"S1","parameter":"distance_error_max","value":0.15}}}}
+用户："把S1允许的距离误差上限放宽到0.15米" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.95,"action":{{"action":"change_parameter","subtask_id":"S1","parameter":"distance_error_max","value":0.15}}}}
+用户："把S1最大角度偏差调整到15度" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.94,"action":{{"action":"change_parameter","subtask_id":"S1","parameter":"angle_error_max","value":15}}}}
+用户："人工确认当前实际距离误差为0.05米" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.91,"action":{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}}}
+用户："人工确认当前面板已经可见" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.91,"action":{{"action":"override_field","subtask_id":"S1","field":"panel_visible_flag","value":1}}}}
 用户："先把距离改成0.05，再重试S1" -> {{"intent":"irrelevant","query_topics":[],"query_fields":[],"query_all_basic_info":false,"action":null,"needs_clarification":true,"confidence":0.95,"reason":"同一消息同时包含WRITE和CONTROL，请拆分为两条指令"}}
 """
 
@@ -128,6 +149,7 @@ REPLY_SYSTEM_PROMPT = """\
 - 失败表示任务完成条件未满足，例如位置、稳定性、路径或执行结果没有达到要求。异常表示机器人、环境或系统组件存在异常迹象，例如感知、通信、规划、执行或操作对象状态异常。失败不等于异常。
 - 只有本轮信息明确提供异常说明时，才可以讨论异常；异常只能作为关联影响或排查线索，不得说成确定原因，除非本轮信息明确给出确定因果。
 - 任务完成、等待审核、执行中、失败、回退、重试和干预结果等安全关键事实，必须完全以本轮系统处理结果和当前任务事实为准，不得自由改写。
+- 对流程控制和写入请求，不得重新解释或改变 operation_result 中已经确定的 action、目标、字段和值。
 
 回复策略：
 - 查询进度：说明当前推进到哪个子任务、该子任务状态、整体流程状态，以及是否需要人工处理；不主动展开判据和异常细节。
