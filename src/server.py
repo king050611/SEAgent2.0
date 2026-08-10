@@ -14,6 +14,36 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
     # 设置模板文件夹为项目根目录（与 run.py 同级）
     app = Flask(__name__, template_folder=str(Path(__file__).parent.parent))
 
+    def _is_standalone_confirmation_message(message: str) -> bool:
+        text = (message or "").strip().lower()
+        return text in {"确认", "确定", "同意", "可以", "执行", "yes", "y", "ok", "好"}
+
+    def _is_standalone_cancel_message(message: str) -> bool:
+        text = (message or "").strip().lower()
+        return text in {"取消", "不用", "不要", "否", "no", "n"}
+
+    def _is_explicit_new_intervention_message(message: str) -> bool:
+        text = (message or "").strip()
+        if not text or _is_standalone_confirmation_message(text) or _is_standalone_cancel_message(text):
+            return False
+        if any(marker in text for marker in ("吗", "能否", "是否", "可以", "可不可以", "？", "?")):
+            return False
+        return any(
+            keyword in text
+            for keyword in (
+                "重试",
+                "重新执行",
+                "回退",
+                "退回",
+                "修改",
+                "改成",
+                "覆盖",
+                "强制完成",
+                "人工完成",
+                "跳过",
+            )
+        )
+
     def _json_body():
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
@@ -160,6 +190,34 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
 
             pending = task_manager.get_pending_intervention(task_state)
             if pending:
+                if _is_explicit_new_intervention_message(user_message):
+                    result = query_responder.process(user_message, task_state)
+                    pending_intent = pending.get("intent") or (pending.get("raw_intent") or {}).get("intent") or "intervention"
+                    if result["type"] == "query":
+                        return jsonify({
+                            "type": "query",
+                            "intent": "query",
+                            "answer": result["answer"],
+                            "pending_action": pending.get("action"),
+                            "refresh_required": False,
+                        })
+                    answer = query_responder.generate_reply(
+                        reply_intent=(
+                            "当前已有一个待确认的流程控制或写入请求。用户本轮提出了新的流程控制或写入请求，"
+                            "请说明不会覆盖原待确认动作，并要求用户先回复“确认”或“取消”。"
+                        ),
+                        user_message=user_message,
+                        task_state=task_state,
+                        operation_result={"pending_intervention": pending, "new_request": result, "confirmation_decision": {"decision": "other", "reason": "explicit_new_intervention"}},
+                    )
+                    return jsonify({
+                        "type": "intervention_pending",
+                        "intent": pending_intent,
+                        "answer": answer,
+                        "pending_action": pending.get("action"),
+                        "refresh_required": False,
+                    })
+
                 decision_info = query_responder.classify_confirmation(user_message, pending, task_state)
                 decision = decision_info.get("decision")
 
@@ -233,6 +291,15 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                 })
 
             result = query_responder.process(user_message, task_state)
+
+            if _is_standalone_confirmation_message(user_message):
+                answer = query_responder.generate_reply(
+                    reply_intent="当前没有待确认的流程控制或写入请求。请说明用户需要先发起明确动作，例如重试、回退、修改或人工完成；不要修改任务状态。",
+                    user_message=user_message,
+                    task_state=task_state,
+                    operation_result={"error": "no_pending_intervention_to_confirm", "message": "当前没有待确认操作。"},
+                )
+                return jsonify({"type": "irrelevant", "intent": "irrelevant", "answer": answer, "refresh_required": False})
 
             if result["type"] == "irrelevant":
                 return jsonify({"type": "irrelevant", "intent": result.get("intent", "irrelevant"), "answer": result["answer"], "refresh_required": False})

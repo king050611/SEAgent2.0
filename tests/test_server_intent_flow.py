@@ -135,6 +135,35 @@ class ServerIntentFlowTest(unittest.TestCase):
         self.assertEqual(body["intent"], "control")
         self.assertEqual(body["pending_action"], pending["action"])
         self.assertEqual(manager.set_calls, [])
+        self.assertEqual(responder.confirm_calls, [])
+
+    def test_pending_new_rollback_does_not_confirm_stale_force_complete(self):
+        pending = {"action": {"action": "force_complete", "subtask_id": "S1"}, "intent": "control", "user_message": "确认"}
+        responder = FakeResponder(
+            {"type": "control", "intent": "control", "action": {"action": "rollback", "to_subtask": "S1"}, "raw_intent": {"intent": "control"}},
+            decision={"decision": "confirm", "confidence": 0.99},
+        )
+        client, manager = build_client(responder, pending=pending)
+
+        response = client.post("/api/query", json={"message": "回退到S1", "task_id": "T1"})
+
+        body = response.get_json()
+        self.assertEqual(body["type"], "intervention_pending")
+        self.assertEqual(body["pending_action"], pending["action"])
+        self.assertEqual(manager.execute_calls, [])
+        self.assertEqual(manager.clear_calls, [])
+        self.assertEqual(responder.confirm_calls, [])
+
+    def test_standalone_confirm_without_pending_does_not_create_force_complete(self):
+        responder = FakeResponder({"type": "control", "intent": "control", "action": {"action": "force_complete", "subtask_id": "S1"}, "raw_intent": {"intent": "control"}})
+        client, manager = build_client(responder)
+
+        response = client.post("/api/query", json={"message": "确认", "task_id": "T1"})
+
+        body = response.get_json()
+        self.assertEqual(body["type"], "irrelevant")
+        self.assertEqual(manager.set_calls, [])
+        self.assertEqual(manager.execute_calls, [])
 
     def test_confirm_executes_original_pending_action(self):
         pending = {"action": {"action": "retry", "subtask_id": "S1"}, "intent": "control", "user_message": "重试S1"}

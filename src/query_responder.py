@@ -26,9 +26,25 @@ class QueryResponder:
     WRITE_ACTIONS = {"change_parameter", "override_field"}
     VALID_ACTIONS = CONTROL_ACTIONS | WRITE_ACTIONS
     QUERY_TOPICS = {
-        "task_identity", "time", "location", "task_details", "equipment", "conditions",
         "task_status", "subtask_status", "criteria", "anomaly", "pending_action",
     }
+    BASIC_INFO_FIELDS = (
+        {"key": "task_id", "label": "任务编号"},
+        {"key": "task_type", "label": "任务类型（插入/拔出）"},
+        {"key": "start_time", "label": "任务开始时间"},
+        {"key": "end_time", "label": "任务结束时间"},
+        {"key": "water_depth", "label": "水深（米）"},
+        {"key": "oilfield_name", "label": "油田名称"},
+        {"key": "oilfield_coordinates", "label": "油田经纬度坐标"},
+        {"key": "wellhead_id", "label": "井口编号"},
+        {"key": "equipment_class", "label": "机器人类别"},
+        {"key": "equipment_family", "label": "作业机器人系列"},
+        {"key": "equipment_specification", "label": "机器人规格"},
+        {"key": "equipment_type", "label": "作业设备型号"},
+        {"key": "equipment_unit_id", "label": "具体机器人编号"},
+        {"key": "payload", "label": "携带工具"},
+        {"key": "support_vessel", "label": "支持船编号"},
+    )
     WRITABLE_PARAMETERS = {"timeout_seconds", "max_retries"}
     MIN_MUTATION_CONFIDENCE = 0.75
     VALID_CONFIRM_DECISIONS = {"confirm", "cancel", "other"}
@@ -57,9 +73,17 @@ class QueryResponder:
             # ############# anomaly advice 接入开始 #############
             operation_result = self._build_query_operation_result(task_state, user_message=user_message)
             query_topics = intent_info.get("query_topics", [])
+            query_fields = intent_info.get("query_fields", [])
             operation_result.update({
                 "query_topics": query_topics,
-                "query_facts": self._build_query_facts(task_state, query_topics),
+                "query_fields": query_fields,
+                "query_all_basic_info": bool(intent_info.get("query_all_basic_info")),
+                "query_facts": self._build_query_facts(
+                    task_state,
+                    query_topics,
+                    query_fields=query_fields,
+                    query_all_basic_info=bool(intent_info.get("query_all_basic_info")),
+                ),
             })
             reply_intent = (
                 "根据用户问题和本轮任务事实回答。"
@@ -572,6 +596,18 @@ class QueryResponder:
                 "失败原因": operation_result.get("message") or operation_result.get("error"),
             }
 
+        query_facts = operation_result.get("query_facts")
+        if isinstance(query_facts, dict) and query_facts:
+            context = {"处理类型": "任务查询"}
+            if query_facts.get("basic_info"):
+                context["基础信息查询事实"] = query_facts.get("basic_info")
+            runtime_facts = {key: value for key, value in query_facts.items() if key != "basic_info"}
+            if runtime_facts:
+                context["运行时查询事实"] = runtime_facts
+            if operation_result.get("advice_source") == "anomaly_advisor":
+                context["处理结果"] = "本轮已整理当前失败说明、异常说明和排查建议；回复时按用户问题类型选择使用。"
+            return context
+
         if operation_result.get("advice_source") == "anomaly_advisor":
             return {
                 "处理类型": "任务查询",
@@ -871,7 +907,6 @@ class QueryResponder:
             "进度", "当前进展", "推进到", "到哪", "当前步骤", "当前子任务",
             "卡点", "卡在哪", "为什么", "原因", "失败", "异常", "异常建议",
             "判据", "软判据", "硬判据", "下一步", "建议", "怎么办",
-            "水深", "油田", "坐标", "经纬度", "机器人", "载荷", "支持船",
             "能否", "是否", "能", "可以", "可不可以", "吗", "怎么", "会有什么影响", "影响", "生效", "安全吗",
             "status", "progress", "state", "current",
         )
@@ -879,6 +914,30 @@ class QueryResponder:
 
     def _looks_like_query(self, user_message: str) -> bool:
         return self._is_obvious_query(user_message)
+
+    def _is_standalone_confirmation_message(self, user_message: str) -> bool:
+        text = (user_message or "").strip().lower()
+        return text in {"确认", "确定", "同意", "可以", "执行", "yes", "y", "ok", "好"}
+
+    def _explicit_control_action_from_message(self, user_message: str) -> Optional[str]:
+        text = (user_message or "").strip()
+        if not text:
+            return None
+        if any(marker in text for marker in ("吗", "能否", "是否", "可不可以", "？", "?")):
+            return None
+        if "重试" in text or "重新执行" in text:
+            return "retry"
+        if "回退" in text or "退回" in text:
+            return "rollback"
+        if any(keyword in text for keyword in ("强制完成", "人工完成", "跳过")):
+            return "force_complete"
+        return None
+
+    def _control_action_matches_message(self, action_type: str, user_message: str) -> bool:
+        explicit = self._explicit_control_action_from_message(user_message)
+        if explicit is None:
+            return True
+        return action_type == explicit
 
     def _classify_intent(self, user_message: str, task_state: Dict[str, Any]) -> Dict[str, Any]:
         """调用 LLM 判断意图。失败时降级为 irrelevant，避免误操作任务。"""
@@ -891,6 +950,7 @@ class QueryResponder:
             user_message=user_message,
             task_summary=json.dumps(summary, ensure_ascii=False),
             available_subtasks=json.dumps(available_subtasks, ensure_ascii=False),
+            available_basic_fields=json.dumps(self._available_basic_fields(task_state), ensure_ascii=False),
         )
         result = self._safe_extract_json(
             [{"role": "user", "content": prompt}],
@@ -904,7 +964,7 @@ class QueryResponder:
             return {"intent": "irrelevant", "confidence": 0.0}
         return self._normalize_intent_info(result, task_state, user_message)
 
-    def _normalize_query_topics(self, raw_topics: Any) -> List[str]:
+    def _normalize_query_topics(self, raw_topics: Any, default_to_task_status: bool = True) -> List[str]:
         if isinstance(raw_topics, str):
             raw_topics = [raw_topics]
         if not isinstance(raw_topics, list):
@@ -913,7 +973,22 @@ class QueryResponder:
         for topic in raw_topics:
             if topic in self.QUERY_TOPICS and topic not in topics:
                 topics.append(topic)
-        return topics or ["task_status"]
+        if topics:
+            return topics
+        return ["task_status"] if default_to_task_status else []
+
+    def _normalize_query_fields(self, raw_fields: Any, task_state: Dict[str, Any]) -> List[str]:
+        if isinstance(raw_fields, str):
+            raw_fields = [raw_fields]
+        if not isinstance(raw_fields, list):
+            raw_fields = []
+        allowed = {item["key"] for item in self._available_basic_fields(task_state)}
+        fields: List[str] = []
+        for field in raw_fields:
+            key = str(field)
+            if key in allowed and key not in fields:
+                fields.append(key)
+        return fields
 
     def _query_topics_from_message(self, user_message: str) -> List[str]:
         message = user_message or ""
@@ -921,13 +996,7 @@ class QueryResponder:
             return ["pending_action"]
         topics: List[str] = []
         keyword_topics = [
-            (("任务编号", "任务类型", "优先级", "identity"), "task_identity"),
-            (("时间", "开始", "结束", "time"), "time"),
-            (("水深", "油田", "坐标", "经纬度", "location"), "location"),
-            (("采油树", "井口", "孔位", "目标", "详情"), "task_details"),
-            (("机器人", "载荷", "支持船", "设备", "equipment"), "equipment"),
-            (("条件", "海况", "能见度", "conditions"), "conditions"),
-            (("状态", "进度", "当前", "推进"), "task_status"),
+            (("状态", "进度", "推进"), "task_status"),
             (("子任务", "步骤", "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8"), "subtask_status"),
             (("判据", "硬判据", "软判据", "阈值", "criteria"), "criteria"),
             (("异常", "失败", "建议", "卡点"), "anomaly"),
@@ -936,7 +1005,7 @@ class QueryResponder:
         for keywords, topic in keyword_topics:
             if any(keyword in message for keyword in keywords) and topic not in topics:
                 topics.append(topic)
-        return topics or ["task_status"]
+        return topics
 
     def _clarification_result(self, raw: Dict[str, Any], reason: str) -> Dict[str, Any]:
         return {
@@ -954,11 +1023,18 @@ class QueryResponder:
         intent = raw.get("intent")
         action = raw.get("action") if isinstance(raw.get("action"), dict) else None
 
+        if self._is_standalone_confirmation_message(user_message):
+            return self._clarification_result(raw, "confirmation_without_pending_intervention")
+
         if self._looks_like_query(user_message):
+            query_fields = self._normalize_query_fields(raw.get("query_fields"), task_state)
+            query_all_basic_info = bool(raw.get("query_all_basic_info"))
             return {
                 "intent": "query",
                 "target_task_id": raw.get("target_task_id"),
                 "query_topics": self._query_topics_from_message(user_message),
+                "query_fields": query_fields,
+                "query_all_basic_info": query_all_basic_info,
                 "action": None,
                 "needs_clarification": False,
                 "confidence": max(float(raw.get("confidence") or 0.0), 1.0),
@@ -966,10 +1042,17 @@ class QueryResponder:
             }
 
         if intent == "query":
+            query_fields = self._normalize_query_fields(raw.get("query_fields"), task_state)
+            query_all_basic_info = bool(raw.get("query_all_basic_info"))
             return {
                 "intent": "query",
                 "target_task_id": raw.get("target_task_id"),
-                "query_topics": self._normalize_query_topics(raw.get("query_topics")),
+                "query_topics": self._normalize_query_topics(
+                    raw.get("query_topics"),
+                    default_to_task_status=not (query_fields or query_all_basic_info),
+                ),
+                "query_fields": query_fields,
+                "query_all_basic_info": query_all_basic_info,
                 "action": None,
                 "needs_clarification": bool(raw.get("needs_clarification", False)),
                 "confidence": raw.get("confidence", 0.0),
@@ -997,6 +1080,8 @@ class QueryResponder:
             if intent == "control":
                 if action_type not in self.CONTROL_ACTIONS:
                     return self._clarification_result(raw, "control_intent_cannot_carry_write_action")
+                if not self._control_action_matches_message(action_type, user_message):
+                    return self._clarification_result(raw, "control_action_mismatches_user_message")
                 normalized = self._validate_control_action(action, task_state)
             else:
                 if action_type not in self.WRITE_ACTIONS:
@@ -1103,37 +1188,89 @@ class QueryResponder:
             return set()
         return set((criteria_def.get("hard") or {}).keys()) | set((criteria_def.get("soft") or {}).keys())
 
-    def _build_query_facts(self, task_state: Dict[str, Any], query_topics: List[str]) -> Dict[str, Any]:
-        topics = self._normalize_query_topics(query_topics)
+    def _metadata_without_runtime_example(self, task_state: Dict[str, Any]) -> Dict[str, Any]:
         metadata = dict((task_state or {}).get("metadata") or {})
         metadata.pop("monitoring_runtime_example", None)
-        task_details = ((metadata.get("task") or {}).get("details") or {})
+        return metadata
+
+    def _available_basic_fields(self, task_state: Dict[str, Any]) -> List[Dict[str, str]]:
+        metadata = self._metadata_without_runtime_example(task_state)
+        schema = (
+            metadata.get("output_schema")
+            or ((metadata.get("template") or {}).get("output_schema") if isinstance(metadata.get("template"), dict) else None)
+            or ((metadata.get("task_template") or {}).get("output_schema") if isinstance(metadata.get("task_template"), dict) else None)
+        )
+        fields = schema.get("normal") if isinstance(schema, dict) else None
+        if not isinstance(fields, list):
+            return [dict(item) for item in self.BASIC_INFO_FIELDS]
+        normalized: List[Dict[str, str]] = []
+        for item in fields:
+            if not isinstance(item, dict) or not item.get("key"):
+                continue
+            normalized.append({"key": str(item.get("key")), "label": str(item.get("label") or item.get("key"))})
+        return normalized or [dict(item) for item in self.BASIC_INFO_FIELDS]
+
+    def _basic_info_source(self, task_state: Dict[str, Any]) -> Dict[str, Any]:
+        task_state = task_state or {}
+        metadata = self._metadata_without_runtime_example(task_state)
+        location = metadata.get("location") or {}
+        task = metadata.get("task") or {}
+        task_details = task.get("details") or {}
+        equipment = metadata.get("equipment") or {}
+        support_vessel = equipment.get("support_vessel")
+        target = task_details.get("target") or {}
+        return {
+            "task_id": task_state.get("task_id") or metadata.get("intent_id"),
+            "task_type": metadata.get("task_type") or task.get("type"),
+            "start_time": (metadata.get("time") or {}).get("start"),
+            "end_time": (metadata.get("time") or {}).get("end"),
+            "water_depth": location.get("water_depth_m") if isinstance(location, dict) else None,
+            "oilfield_name": location.get("oilfield") if isinstance(location, dict) else None,
+            "oilfield_coordinates": {
+                "latitude": location.get("latitude", target.get("latitude")),
+                "longitude": location.get("longitude", target.get("longitude")),
+            } if isinstance(location, dict) else {},
+            "wellhead_id": task_details.get("wellhead_id"),
+            "equipment_class": equipment.get("equipment_class") or equipment.get("robot_type"),
+            "equipment_family": equipment.get("equipment_family"),
+            "equipment_specification": equipment.get("equipment_specification"),
+            "equipment_type": equipment.get("equipment_type"),
+            "equipment_unit_id": equipment.get("equipment_unit_id"),
+            "payload": equipment.get("payload") or [],
+            "support_vessel": support_vessel or {},
+        }
+
+    def _build_basic_info_facts(
+        self,
+        task_state: Dict[str, Any],
+        query_fields: List[str],
+        query_all_basic_info: bool = False,
+    ) -> Dict[str, Any]:
+        available = self._available_basic_fields(task_state)
+        allowed = [item["key"] for item in available]
+        selected = allowed if query_all_basic_info else self._normalize_query_fields(query_fields, task_state)
+        source = self._basic_info_source(task_state)
+        return {field: source.get(field) for field in selected if field in source}
+
+    def _build_query_facts(
+        self,
+        task_state: Dict[str, Any],
+        query_topics: List[str],
+        query_fields: Optional[List[str]] = None,
+        query_all_basic_info: bool = False,
+    ) -> Dict[str, Any]:
+        has_basic_request = bool(query_fields) or bool(query_all_basic_info)
+        topics = self._normalize_query_topics(query_topics, default_to_task_status=not has_basic_request)
         current_subtask = self._find_subtask(task_state, (task_state or {}).get("current_subtask"))
         facts: Dict[str, Any] = {}
 
-        if "task_identity" in topics:
-            facts["task_identity"] = {
-                "task_id": (task_state or {}).get("task_id"),
-                "intent_id": metadata.get("intent_id"),
-                "task_type": metadata.get("task_type"),
-                "priority": metadata.get("priority"),
-                "description": (task_state or {}).get("description"),
-            }
-        if "time" in topics:
-            facts["time"] = metadata.get("time") or {}
-        if "location" in topics:
-            facts["location"] = metadata.get("location") or {}
-        if "task_details" in topics:
-            facts["task_details"] = {
-                "wellhead_id": task_details.get("wellhead_id"),
-                "target": task_details.get("target") or {},
-                "christmas_tree_type": task_details.get("christmas_tree_type"),
-                "hole_positions": task_details.get("hole_positions") or [],
-            }
-        if "equipment" in topics:
-            facts["equipment"] = metadata.get("equipment") or {}
-        if "conditions" in topics:
-            facts["conditions"] = metadata.get("conditions") or {}
+        basic_info = self._build_basic_info_facts(
+            task_state,
+            list(query_fields or []),
+            query_all_basic_info=query_all_basic_info,
+        )
+        if basic_info:
+            facts["basic_info"] = basic_info
         if "task_status" in topics:
             facts["task_status"] = {
                 "overall_status": (task_state or {}).get("overall_status"),

@@ -22,7 +22,7 @@
       "status": "in_progress",
       "retry_count": 0,
       "completion_criteria": {},
-      "evidence_summary": "人工确认回退后重新执行",
+      "evidence_summary": "",
       "latest_state": {}
     },
     {

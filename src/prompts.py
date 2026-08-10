@@ -20,19 +20,23 @@ CLASSIFY_PROMPT = """\
 可用子任务：
 {available_subtasks}
 
+可查询基础信息字段：
+{available_basic_fields}
+
 输出规则：
 1. 只能输出一个 JSON 对象，不能输出解释、Markdown 或代码块。
 2. intent 只能是 query、control、write、irrelevant 四者之一。
 3. 统一输出字段：
-   {{"intent":"query|control|write|irrelevant","target_task_id":null,"query_topics":[],"action":null,"needs_clarification":false,"confidence":0.0到1.0,"reason":"简短依据"}}
-4. QUERY：用户想了解任务事实、任务时间、油田、水深、坐标、机器人、载荷、支持船、任务进度、当前卡点、判据、下一步、失败原因、异常处理建议、待确认动作影响、干预是否生效或当前状态时。
+   {{"intent":"query|control|write|irrelevant","target_task_id":null,"query_topics":[],"query_fields":[],"query_all_basic_info":false,"action":null,"needs_clarification":false,"confidence":0.0到1.0,"reason":"简短依据"}}
+4. QUERY：用户想了解任务基础信息、任务进度、当前卡点、判据、下一步、失败原因、异常处理建议、待确认动作影响、干预是否生效或当前状态时。
 5. CONTROL：用户明确要求改变流程位置或推进方式时，只能携带 rollback、retry、force_complete。
 6. WRITE：用户明确指定写入参数、字段和值时，只能携带 change_parameter、override_field。
 7. IRRELEVANT：用户消息与当前任务无关，或无法可靠识别为前三类时。
 
-query_topics 可选值：
-task_identity, time, location, task_details, equipment, conditions,
+query_topics 只用于运行时查询，可选值：
 task_status, subtask_status, criteria, anomaly, pending_action
+
+query_fields 只用于基础信息查询，必须从“可查询基础信息字段”中选择；如果用户要求全部基础信息，query_fields 输出空列表且 query_all_basic_info 输出 true。
 
 CONTROL action 必须使用以下格式，且字段名必须完全匹配：
 - 回退到某子任务：{{"action":"rollback","to_subtask":"S2"}}
@@ -57,15 +61,17 @@ arm_reset_flag, return_position_error_max
 - 对缺少目标子任务的回退/重试请求，可以判断为 control，但 action 中不要填充 to_subtask 或 subtask_id。
 - 同一消息同时包含 CONTROL 和 WRITE 时，needs_clarification 必须为 true，不要猜测执行顺序。
 示例：
-用户："当前水深是多少" -> {{"intent":"query","query_topics":["location"],"action":null,"needs_clarification":false,"confidence":0.98}}
-用户："S2 能重试吗" -> {{"intent":"query","query_topics":["pending_action"],"action":null,"needs_clarification":false,"confidence":0.96}}
-用户："重试S4会有什么影响" -> {{"intent":"query","query_topics":["pending_action","subtask_status"],"action":null,"needs_clarification":false,"confidence":0.95}}
-用户："回退到S2" -> {{"intent":"control","query_topics":[],"confidence":0.95,"action":{{"action":"rollback","to_subtask":"S2"}}}}
-用户："重试S4" -> {{"intent":"control","query_topics":[],"confidence":0.92,"action":{{"action":"retry","subtask_id":"S4"}}}}
-用户："强制完成S1" -> {{"intent":"control","query_topics":[],"confidence":0.90,"action":{{"action":"force_complete","subtask_id":"S1"}}}}
-用户："把S2的超时时间改成60秒" -> {{"intent":"write","query_topics":[],"confidence":0.88,"action":{{"action":"change_parameter","subtask_id":"S2","parameter":"timeout_seconds","value":60}}}}
-用户："人工确认当前距离误差是0.05米" -> {{"intent":"write","query_topics":[],"confidence":0.91,"action":{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}}}
-用户："先把距离改成0.05，再重试S1" -> {{"intent":"irrelevant","query_topics":[],"action":null,"needs_clarification":true,"confidence":0.95,"reason":"同一消息同时包含WRITE和CONTROL，请拆分为两条指令"}}
+用户："当前水深是多少" -> {{"intent":"query","query_topics":[],"query_fields":["water_depth"],"query_all_basic_info":false,"action":null,"needs_clarification":false,"confidence":0.98}}
+用户："这次用的是什么机器人" -> {{"intent":"query","query_topics":[],"query_fields":["equipment_class","equipment_family","equipment_type","equipment_unit_id"],"query_all_basic_info":false,"action":null,"needs_clarification":false,"confidence":0.96}}
+用户："把这个采油树任务的全部基础信息告诉我" -> {{"intent":"query","query_topics":[],"query_fields":[],"query_all_basic_info":true,"action":null,"needs_clarification":false,"confidence":0.96}}
+用户："S2 能重试吗" -> {{"intent":"query","query_topics":["pending_action"],"query_fields":[],"query_all_basic_info":false,"action":null,"needs_clarification":false,"confidence":0.96}}
+用户："重试S4会有什么影响" -> {{"intent":"query","query_topics":["pending_action","subtask_status"],"query_fields":[],"query_all_basic_info":false,"action":null,"needs_clarification":false,"confidence":0.95}}
+用户："回退到S2" -> {{"intent":"control","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.95,"action":{{"action":"rollback","to_subtask":"S2"}}}}
+用户："重试S4" -> {{"intent":"control","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.92,"action":{{"action":"retry","subtask_id":"S4"}}}}
+用户："强制完成S1" -> {{"intent":"control","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.90,"action":{{"action":"force_complete","subtask_id":"S1"}}}}
+用户："把S2的超时时间改成60秒" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.88,"action":{{"action":"change_parameter","subtask_id":"S2","parameter":"timeout_seconds","value":60}}}}
+用户："人工确认当前距离误差是0.05米" -> {{"intent":"write","query_topics":[],"query_fields":[],"query_all_basic_info":false,"confidence":0.91,"action":{{"action":"override_field","subtask_id":"S1","field":"distance_error_max","value":0.05}}}}
+用户："先把距离改成0.05，再重试S1" -> {{"intent":"irrelevant","query_topics":[],"query_fields":[],"query_all_basic_info":false,"action":null,"needs_clarification":true,"confidence":0.95,"reason":"同一消息同时包含WRITE和CONTROL，请拆分为两条指令"}}
 """
 
 CONFIRM_PROMPT = """\
@@ -117,6 +123,7 @@ REPLY_SYSTEM_PROMPT = """\
 
 回答原则：
 - 事实优先：只能依据本轮提供的任务事实和系统处理结果回答；信息不足时直接说明缺少什么，不要猜测。
+- 查询基础信息时，只能使用本轮系统处理结果中的“基础信息查询事实”作答；不要从任务说明、历史示例或字段名推测未提供的值。
 - 当前优先：优先围绕当前正在处理的子任务回答，不要用历史已完成步骤替代当前步骤。
 - 失败表示任务完成条件未满足，例如位置、稳定性、路径或执行结果没有达到要求。异常表示机器人、环境或系统组件存在异常迹象，例如感知、通信、规划、执行或操作对象状态异常。失败不等于异常。
 - 只有本轮信息明确提供异常说明时，才可以讨论异常；异常只能作为关联影响或排查线索，不得说成确定原因，除非本轮信息明确给出确定因果。
