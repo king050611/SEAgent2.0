@@ -426,7 +426,7 @@ class TaskManager:
         return self._advance_to_next(task_id, subtask_id)
 
     # ---------- Pending Intervention Confirmation ----------
-    def set_pending_intervention(self, task_id: str, action: Dict[str, Any], user_message: str, raw_intent: Dict[str, Any] = None) -> Dict[str, Any]:
+    def set_pending_intervention(self, task_id: str, action: Dict[str, Any], user_message: str, raw_intent: Dict[str, Any] = None, extra_fields: Dict[str, Any] = None) -> Dict[str, Any]:
         """Persist an intervention action that must be confirmed by the user before execution."""
         result: Dict[str, Any] = {}
 
@@ -439,9 +439,31 @@ class TaskManager:
                 "created_at": time.time(),
                 "status": "awaiting_confirmation",
             }
+            if isinstance(extra_fields, dict):
+                for k, v in extra_fields.items():
+                    state["pending_intervention"][k] = v
             result = {"ok": True, "pending_intervention": state["pending_intervention"]}
 
         updated = self.state_store.update_task_atomic(task_id, _set_update)
+        if updated is None:
+            return {"error": "task not found"}
+        return result
+
+    def update_pending_intervention_fields(self, task_id: str, fields: Dict[str, Any]) -> Dict[str, Any]:
+        """在不改变现有 action/status 的前提下，为 pending_intervention 附加或更新字段。"""
+        result: Dict[str, Any] = {}
+
+        def _update(state: Dict[str, Any]):
+            nonlocal result
+            pending = state.get("pending_intervention")
+            if not isinstance(pending, dict):
+                return
+            if isinstance(fields, dict):
+                for k, v in fields.items():
+                    pending[k] = v
+            result = {"ok": True, "pending_intervention": state["pending_intervention"]}
+
+        updated = self.state_store.update_task_atomic(task_id, _update)
         if updated is None:
             return {"error": "task not found"}
         return result

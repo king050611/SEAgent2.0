@@ -45,7 +45,7 @@ class QueryResponder:
         {"key": "payload", "label": "携带工具"},
         {"key": "support_vessel", "label": "支持船编号"},
     )
-    WRITABLE_PARAMETERS = {"timeout_seconds", "max_retries"}
+    BASE_WRITABLE_PARAMETERS = {"timeout_seconds", "max_retries"}
     MIN_MUTATION_CONFIDENCE = 0.75
     VALID_CONFIRM_DECISIONS = {"confirm", "cancel", "other"}
 
@@ -54,6 +54,9 @@ class QueryResponder:
         self.task_manager = task_manager  # 可选，用于全局模式
         # ########## 修改内容：加载 criteria.yaml 中的判据解释，用于自然语言说明未满足判据含义。 ################
         self.criteria_config = self._load_criteria_config()
+        # ################
+        # ########## Bug A 修复：动态构建 WRITABLE_PARAMETERS，包含所有判据阈值字段（规则类参数） ################
+        self.WRITABLE_PARAMETERS = self._build_writable_parameters()
         # ################
 
     # ---------- 原有方法保持不变 ----------
@@ -66,6 +69,18 @@ class QueryResponder:
         - {"type":"write", "action": dict}
         - {"type":"irrelevant", "answer": str}
         """
+        # ########## Bug C4 修复：process 入口强拦截 standalone 确认/取消类消息 ##########
+        # 无 pending 时，"确认/确定/同意/执行/取消/不要"这类词无明确上下文，直接视为 irrelevant，绝不走 LLM 分类分支
+        if self._is_standalone_confirmation_message(user_message) or self._is_standalone_cancel_message(user_message):
+            answer = self.generate_reply(
+                reply_intent="当前没有待确认的流程控制或写入请求。请说明用户需要先发起明确动作，例如重试、回退、修改或人工完成；不要修改任务状态。",
+                user_message=user_message,
+                task_state=task_state,
+                operation_result={"error": "no_pending_intervention_to_confirm", "message": "当前没有待确认操作。"},
+            )
+            return {"type": "irrelevant", "intent": "irrelevant", "answer": answer}
+        # ########################################################################
+
         intent_info = self._classify_intent(user_message, task_state)
         intent = intent_info.get("intent")
 
@@ -287,10 +302,31 @@ class QueryResponder:
     ) -> Dict[str, Any]:
         """调用 LLM 判断用户是否确认待执行干预。失败时降级为 other，避免误操作。"""
         print("pending 干扰为：", pending_intervention)
+        # ########## Bug C3 修复：构建 superseding / history 上下文注入 Prompt ##########
+        superseding = pending_intervention.get("superseding_proposal") if isinstance(pending_intervention.get("superseding_proposal"), dict) else None
+        history = pending_intervention.get("new_intervention_history") if isinstance(pending_intervention.get("new_intervention_history"), list) else []
+        if superseding:
+            superseding_section = (
+                "【新提出的候选动作（用户上一轮刚提出，尚未确认）】\n"
+                + json.dumps(superseding, ensure_ascii=False, indent=2)
+            )
+        else:
+            superseding_section = "【新提出的候选动作】无"
+        if history:
+            new_history_section = (
+                "【自原 pending 出现后，用户又提出的所有新干预历史】（按时间从早到晚）\n"
+                + json.dumps(history, ensure_ascii=False, indent=2)
+            )
+        else:
+            new_history_section = "【后续新干预历史】无"
+        superseding_warning_flag = "true" if (superseding or history) else "false"
         prompt = CONFIRM_PROMPT.format(
             user_message=user_message,
             pending_intervention=json.dumps(pending_intervention, ensure_ascii=False, indent=2),
             task_summary=json.dumps(self._task_summary(task_state), ensure_ascii=False, indent=2),
+            superseding_section=superseding_section,
+            new_history_section=new_history_section,
+            superseding_warning_flag=superseding_warning_flag,
         )
         result = self._safe_extract_json(
             [{"role": "user", "content": prompt}],
@@ -302,6 +338,12 @@ class QueryResponder:
             return {"decision": "other", "confidence": 0.0}
         if result.get("decision") not in self.VALID_CONFIRM_DECISIONS:
             return {"decision": "other", "confidence": 0.0}
+        # ########## Bug C3 修复：如果存在 superseding/history 且用户只发了模糊确认，强转 other ############
+        if (superseding or history) and result.get("decision") == "confirm":
+            text = (user_message or "").strip()
+            explicit_old = any(k in text for k in ("确认原动作", "确认原来的", "执行原", "用原", "确认旧", "原来的那个"))
+            if not explicit_old:
+                result = {"decision": "other", "confidence": 0.9, "reason": "ambiguous_confirmation_with_superseding_pending"}
         print("LLM classify_confirmation result:", result)
         return result
 
@@ -811,6 +853,18 @@ class QueryResponder:
             logger.warning("Failed to load criteria explanations from %s: %s", path, exc)
             return {}
 
+    # ########## Bug A 修复：动态构建可写参数集合（BASE + 所有 criteria.yaml 中的阈值字段） ################
+    def _build_writable_parameters(self) -> set:
+        params = set(self.BASE_WRITABLE_PARAMETERS)
+        for criteria_def in self.criteria_config.values():
+            if not isinstance(criteria_def, dict):
+                continue
+            for kind in ("hard", "soft"):
+                group = criteria_def.get(kind)
+                if isinstance(group, dict):
+                    params.update(group.keys())
+        return params
+
     def _criteria_explanations_for_subtask(self, subtask: Dict[str, Any]) -> Dict[str, Dict[str, Any]]:
         criteria_ref = (subtask or {}).get("criteria_ref")
         criteria_def = self.criteria_config.get(criteria_ref) if criteria_ref else None
@@ -902,22 +956,60 @@ class QueryResponder:
         message = (user_message or "").strip().lower()
         if not message:
             return False
-        query_words = (
+        strong_query_words = (
             "当前任务状态", "当前状态", "任务状态", "状态是什么", "现在状态",
             "进度", "当前进展", "推进到", "到哪", "当前步骤", "当前子任务",
             "卡点", "卡在哪", "为什么", "原因", "失败", "异常", "异常建议",
             "判据", "软判据", "硬判据", "下一步", "建议", "怎么办",
-            "能否", "是否", "能", "可以", "可不可以", "吗", "怎么", "会有什么影响", "影响", "生效", "安全吗",
+            "会有什么影响", "影响", "生效",
             "status", "progress", "state", "current",
         )
-        return any(word in message for word in query_words)
+        return any(word in message for word in strong_query_words)
 
-    def _looks_like_query(self, user_message: str) -> bool:
-        return self._is_obvious_query(user_message)
+    # ########## Bug B 修复：任务领域相关性判断，防止完全无关问题被归为 query ##########
+    def _is_task_domain_relevant(self, user_message: str, task_state: Dict[str, Any]) -> bool:
+        text = (user_message or "").strip()
+        if not text:
+            return False
+        # 任务领域关键词（与任务、子任务、步骤、判据、参数、执行过程直接相关）
+        domain_keywords = (
+            "任务", "子任务", "步骤", "环节", "流程", "状态", "进度", "卡点",
+            "判据", "硬判据", "软判据", "阈值", "参数", "异常", "失败", "成功",
+            "完成", "执行", "重试", "回退", "强制", "修改", "调整", "覆盖",
+            "建议", "下一步", "如何", "怎么办", "为何", "为何失败", "为何卡住",
+            "S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8",
+            "水深", "油田", "井口", "机器人", "设备", "支持船", "坐标", "经纬度",
+            "插入", "拔出", "作业",
+            "error", "criteria", "subtask", "task", "retry", "rollback", "override",
+            "parameter", "timeout", "max_retries",
+        )
+        has_domain = any(k in text for k in domain_keywords)
+        if has_domain:
+            return True
+        # 如果 task_state 中有基本信息字段，检查是否匹配
+        metadata = (task_state or {}).get("metadata") or {}
+        text_lower = text.lower()
+        for key in ("oilfield_name", "wellhead_id", "equipment_unit_id", "support_vessel", "task_id"):
+            val = metadata.get(key)
+            if isinstance(val, str) and len(val) >= 2 and val.lower() in text_lower:
+                return True
+        return False
+
+    def _looks_like_query(self, user_message: str, task_state: Optional[Dict[str, Any]] = None) -> bool:
+        if not self._is_obvious_query(user_message):
+            return False
+        # 若能拿到 task_state，增加领域相关性二次过滤
+        if task_state is not None and not self._is_task_domain_relevant(user_message, task_state):
+            return False
+        return True
 
     def _is_standalone_confirmation_message(self, user_message: str) -> bool:
         text = (user_message or "").strip().lower()
         return text in {"确认", "确定", "同意", "可以", "执行", "yes", "y", "ok", "好"}
+
+    def _is_standalone_cancel_message(self, user_message: str) -> bool:
+        text = (user_message or "").strip().lower()
+        return text in {"取消", "不用", "不要", "否", "no", "n"}
 
     def _explicit_control_action_from_message(self, user_message: str) -> Optional[str]:
         text = (user_message or "").strip()
@@ -935,6 +1027,45 @@ class QueryResponder:
 
     def _control_action_matches_message(self, action_type: str, user_message: str) -> bool:
         explicit = self._explicit_control_action_from_message(user_message)
+        if explicit is None:
+            return True
+        return action_type == explicit
+
+    # ########## Bug A 修复：语义边界强约束——change_parameter vs override_field ############
+    def _explicit_write_semantic_from_message(self, user_message: str) -> Optional[str]:
+        """
+        根据中文表达关键词做规则/事实语义兜底判断：
+        - 返回 "change_parameter"：明确修改规则/阈值/上限/允许范围
+        - 返回 "override_field"：明确修正事实/当前实际/人工确认测得值
+        - 返回 None：无法从字面明确判断，交给 LLM 自行判断
+        """
+        text = (user_message or "").strip()
+        if not text:
+            return None
+        if any(marker in text for marker in ("吗", "能否", "是否", "可不可以", "？", "?")):
+            return None
+        rule_keywords = (
+            "阈值", "上限", "下限", "最大值", "最小值", "允许范围", "最大允许",
+            "放宽", "收紧", "设为", "调整到", "修改成", "改成", "改为",
+            "修改参数", "调整参数", "设置为", "设定为", "准入条件",
+            "设置", "改成参数", "改参数", "调参数", "设定参数",
+        )
+        fact_keywords = (
+            "人工确认", "确认实际", "实际测得", "实际是", "实际为",
+            "修正当前", "改成实际", "实际值", "观测到是", "确认是",
+            "当前实际", "测得为", "实测为", "现场确认为",
+            "实测", "现场测得", "测量结果为", "观测为", "看到是",
+        )
+        has_rule = any(k in text for k in rule_keywords)
+        has_fact = any(k in text for k in fact_keywords)
+        if has_rule and not has_fact:
+            return "change_parameter"
+        if has_fact and not has_rule:
+            return "override_field"
+        return None
+
+    def _write_action_matches_message(self, action_type: str, user_message: str) -> bool:
+        explicit = self._explicit_write_semantic_from_message(user_message)
         if explicit is None:
             return True
         return action_type == explicit
@@ -1027,21 +1158,19 @@ class QueryResponder:
         if self._is_standalone_confirmation_message(user_message):
             return self._clarification_result(raw, "confirmation_without_pending_intervention")
 
-        if self._looks_like_query(user_message):
-            query_fields = self._normalize_query_fields(raw.get("query_fields"), task_state)
-            query_all_basic_info = bool(raw.get("query_all_basic_info"))
+        # ########## Bug B 修复：先尊重 LLM 的 irrelevant 判断，不再被 looks_like_query 短路 ##########
+        if intent == "irrelevant":
             return {
-                "intent": "query",
+                "intent": "irrelevant",
                 "target_task_id": raw.get("target_task_id"),
-                "query_topics": self._query_topics_from_message(user_message),
-                "query_fields": query_fields,
-                "query_all_basic_info": query_all_basic_info,
+                "query_topics": [],
                 "action": None,
-                "needs_clarification": False,
-                "confidence": max(float(raw.get("confidence") or 0.0), 1.0),
-                "reason": "question_form_or_query_keywords",
+                "needs_clarification": bool(raw.get("needs_clarification", False)),
+                "confidence": raw.get("confidence", 0.0),
+                "reason": raw.get("reason", ""),
             }
 
+        # ########## Bug B 修复：再尊重 LLM 判定的 query（仅当与 task_state 领域相关时保留） ##########
         if intent == "query":
             query_fields = self._normalize_query_fields(raw.get("query_fields"), task_state)
             query_all_basic_info = bool(raw.get("query_all_basic_info"))
@@ -1060,18 +1189,45 @@ class QueryResponder:
                 "reason": raw.get("reason", ""),
             }
 
-        if intent == "irrelevant":
+        # ########## Bug B 修复：最后才用 looks_like_query 做兜底，并附加领域相关性过滤 ##########
+        # 不再强制覆盖 confidence=1.0，保留 LLM 的原始置信度
+        if self._looks_like_query(user_message, task_state=task_state):
+            query_fields = self._normalize_query_fields(raw.get("query_fields"), task_state)
+            query_all_basic_info = bool(raw.get("query_all_basic_info"))
             return {
-                "intent": "irrelevant",
+                "intent": "query",
                 "target_task_id": raw.get("target_task_id"),
-                "query_topics": [],
+                "query_topics": self._query_topics_from_message(user_message),
+                "query_fields": query_fields,
+                "query_all_basic_info": query_all_basic_info,
                 "action": None,
-                "needs_clarification": bool(raw.get("needs_clarification", False)),
-                "confidence": raw.get("confidence", 0.0),
-                "reason": raw.get("reason", ""),
+                "needs_clarification": False,
+                "confidence": float(raw.get("confidence") or 0.85),
+                "reason": "question_form_or_query_keywords_fallback",
             }
 
         if intent in {"control", "write"}:
+            # ########## Bug B / 测试兼容：咨询式疑问（"能重试吗？"、"可以回退吗？"）应归为 query(pending_action)，而非发起 control/write pending ##########
+            msg = (user_message or "").strip()
+            is_question_form = bool(msg) and any(marker in msg for marker in ("吗", "能否", "是否", "可不可以", "？", "?"))
+            pending_action_topics = self._query_topics_from_message(user_message)
+            if is_question_form and "pending_action" in pending_action_topics:
+                query_fields = self._normalize_query_fields(raw.get("query_fields"), task_state)
+                query_all_basic_info = bool(raw.get("query_all_basic_info"))
+                return {
+                    "intent": "query",
+                    "target_task_id": raw.get("target_task_id"),
+                    "query_topics": self._normalize_query_topics(
+                        pending_action_topics,
+                        default_to_task_status=not (query_fields or query_all_basic_info),
+                    ),
+                    "query_fields": query_fields,
+                    "query_all_basic_info": query_all_basic_info,
+                    "action": None,
+                    "needs_clarification": False,
+                    "confidence": max(float(raw.get("confidence") or 0.0), 0.9),
+                    "reason": "question_form_intent_intervention_inquiry_fallback",
+                }
             confidence = float(raw.get("confidence") or 0.0)
             if confidence < self.MIN_MUTATION_CONFIDENCE:
                 return self._clarification_result(raw, "mutation_confidence_too_low")
@@ -1087,6 +1243,8 @@ class QueryResponder:
             else:
                 if action_type not in self.WRITE_ACTIONS:
                     return self._clarification_result(raw, "write_intent_cannot_carry_control_action")
+                if not self._write_action_matches_message(action_type, user_message):
+                    return self._clarification_result(raw, "write_action_mismatches_user_message_semantic")
                 normalized = self._validate_write_action(action, task_state)
             if not normalized:
                 return self._clarification_result(raw, "invalid_or_incomplete_action")
@@ -1155,7 +1313,8 @@ class QueryResponder:
             parameter = action.get("parameter")
             value = action.get("value")
             subtask_id = action.get("subtask_id") or current_subtask
-            if parameter not in self.WRITABLE_PARAMETERS or value is None or subtask_id not in valid_subtasks:
+            writable_params = getattr(self, "WRITABLE_PARAMETERS", self.BASE_WRITABLE_PARAMETERS)
+            if parameter not in writable_params or value is None or subtask_id not in valid_subtasks:
                 return None
             return {
                 "action": "change_parameter",

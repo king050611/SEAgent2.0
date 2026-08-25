@@ -28,21 +28,35 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
             return False
         if any(marker in text for marker in ("吗", "能否", "是否", "可以", "可不可以", "？", "?")):
             return False
-        return any(
-            keyword in text
-            for keyword in (
-                "重试",
-                "重新执行",
-                "回退",
-                "退回",
-                "修改",
-                "改成",
-                "覆盖",
-                "强制完成",
-                "人工完成",
-                "跳过",
+        # ########## Bug C1 修复：大幅扩展新干预动作的关键词匹配覆盖面 ##########
+        intervention_keywords = (
+            # retry 类
+            "重试", "重新执行", "再跑一次", "再来一次", "再执行一遍", "重新跑", "再试一次",
+            "重跑", "重新试", "再试",
+            # rollback / 回退类
+            "回退", "退回", "回到", "拉回", "退到", "回到步骤", "回到子任务",
+            # change_parameter / 参数修改类
+            "修改", "改成", "改为", "调整", "调为", "设置为", "设定为", "设为",
+            "修改参数", "调整参数", "改参数", "放宽", "收紧", "阈值",
+            # override_field / 事实覆盖类
+            "覆盖", "修正", "改实际", "实测为", "实际为", "实际是", "确认为",
+            "人工确认", "确认实际", "实际测得", "实际值", "现场确认",
+            # force_complete 类
+            "强制完成", "人工完成", "跳过", "强行完成", "直接完成", "人为完成",
+            "手工完成", "标记完成",
+            # 通用动作开头的模式（例如 "把S1..." / "对S2..." 前面有动作后面有子任务编号）
+        )
+        # 如果包含子任务编号模式且前面有关键动作描述，也判定为新干预
+        import re
+        has_subtask_ref = bool(re.search(r"(^|\s|，|,|。|、)(S\d+|步骤\d+|子任务\d+)(\s|，|,|。|、|$)", text))
+        has_action_word = any(
+            k in text
+            for k in (
+                "重", "回", "改", "调", "设", "覆", "修", "强", "跳过", "完成",
+                "确认", "实际", "修正", "标记",
             )
         )
+        return any(keyword in text for keyword in intervention_keywords) or (has_subtask_ref and has_action_word)
 
     def _json_body():
         data = request.get_json(silent=True)
@@ -190,6 +204,7 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
 
             pending = task_manager.get_pending_intervention(task_state)
             if pending:
+                # ########## Bug C2 修复：检测到用户明确的新干预动作时，记录为 superseding_proposal + 历史 ##########
                 if _is_explicit_new_intervention_message(user_message):
                     result = query_responder.process(user_message, task_state)
                     pending_intent = pending.get("intent") or (pending.get("raw_intent") or {}).get("intent") or "intervention"
@@ -201,10 +216,62 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                             "pending_action": pending.get("action"),
                             "refresh_required": False,
                         })
+                    # 保存为新的候选提案（superseding_proposal），并追加到历史上下文
+                    if result["type"] in {"control", "write"} and result.get("action"):
+                        new_proposal = {
+                            "action": result["action"],
+                            "user_message": user_message,
+                            "intent": result["type"],
+                            "timestamp": time.time(),
+                        }
+                        history = list(pending.get("new_intervention_history") or [])
+                        history.append(new_proposal)
+                        # ########## Bug C2 兼容：旧版本/假 task_manager 无 update_pending_intervention_fields 时降级 ##########
+                        if hasattr(task_manager, "update_pending_intervention_fields"):
+                            task_manager.update_pending_intervention_fields(task_id, {
+                                "superseding_proposal": new_proposal,
+                                "new_intervention_history": history,
+                            })
+                        else:
+                            # 降级：直接在原 pending dict 上就地修改（兼容旧接口/测试 stub）
+                            try:
+                                pending["superseding_proposal"] = new_proposal
+                                pending["new_intervention_history"] = history
+                            except Exception:
+                                pass
+                        # 生成明确的三选话术（确认原动作 / 确认新动作 / 取消全部）
+                        answer = query_responder.generate_reply(
+                            reply_intent=(
+                                "当前已有待确认请求（原请求），本轮您又提出了新的流程控制或写入请求（新请求）。"
+                                "请先简要复述两个请求的差异和影响范围，再明确给出三种选择："
+                                "1）回复“确认原动作”或“确认原来的”——将执行原待确认动作；"
+                                "2）回复“确认新动作”或“确认覆盖”——取消原请求并执行您本轮刚刚提出的新请求；"
+                                "3）回复“取消”或“取消全部”——两边都不执行。"
+                                "不要修改任务状态，等待用户三选一。"
+                            ),
+                            user_message=user_message,
+                            task_state=task_state,
+                            operation_result={
+                                "pending_intervention": pending,
+                                "new_request": result,
+                                "new_proposal_saved": True,
+                                "confirmation_decision": {"decision": "other", "reason": "explicit_new_intervention_with_superseding"},
+                            },
+                        )
+                        return jsonify({
+                            "type": "intervention_pending",
+                            "intent": pending_intent,
+                            "answer": answer,
+                            "pending_action": pending.get("action"),
+                            "superseding_action": new_proposal["action"],
+                            "refresh_required": False,
+                        })
+                    # 如果新请求不是 control/write（如 clarification 降级为 irrelevant），保留原提示
                     answer = query_responder.generate_reply(
                         reply_intent=(
-                            "当前已有一个待确认的流程控制或写入请求。用户本轮提出了新的流程控制或写入请求，"
-                            "请说明不会覆盖原待确认动作，并要求用户先回复“确认”或“取消”。"
+                            "当前已有一个待确认的流程控制或写入请求。用户本轮提出了新的请求，"
+                            "请说明不会覆盖原待确认动作，并要求用户先回复“确认”或“取消”；"
+                            "如果用户希望改执行新请求，可以回复“确认覆盖”或“取消原动作后再重新发起”。"
                         ),
                         user_message=user_message,
                         task_state=task_state,
@@ -218,7 +285,61 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                         "refresh_required": False,
                     })
 
-                decision_info = query_responder.classify_confirmation(user_message, pending, task_state)
+                # ########## Bug C2 修复：硬编码识别“确认新动作/确认覆盖/确认原动作” ##########
+                _user_text = (user_message or "").strip()
+                superseding = pending.get("superseding_proposal") if isinstance(pending.get("superseding_proposal"), dict) else None
+                _confirm_new_keywords = ("确认新动作", "确认覆盖", "执行新的", "用新的", "确认新", "覆盖原")
+                _confirm_old_keywords = ("确认原动作", "确认原来的", "执行原", "用原", "确认旧")
+                if superseding and any(k in _user_text for k in _confirm_new_keywords):
+                    # 用户明确选择新动作：先取消旧 pending，把新的 proposal 覆盖为新 pending，然后立即执行 confirm
+                    task_manager.clear_pending_intervention(task_id)
+                    new_action = superseding.get("action") or {}
+                    new_intent = superseding.get("intent") or "intervention"
+                    task_manager.set_pending_intervention(
+                        task_id=task_id,
+                        action=new_action,
+                        user_message=superseding.get("user_message") or user_message,
+                        raw_intent={"intent": new_intent},
+                    )
+                    latest_state = task_manager.get_task_status(task_id) or task_state
+                    # 清掉新 pending 直接执行（用户已经明确选择"确认新"）
+                    task_manager.clear_pending_intervention(task_id)
+                    intervention_result = task_manager.execute_intervention(task_id, new_action)
+                    latest_state = task_manager.get_task_status(task_id) or latest_state
+                    answer = query_responder.generate_intervention_response(
+                        user_message=superseding.get("user_message") or user_message,
+                        intervention_result={
+                            **intervention_result,
+                            "confirmed_by_user": True,
+                            "confirmation_message": user_message,
+                            "superseded_original": True,
+                        },
+                        task_state=latest_state,
+                        intent=new_intent,
+                    )
+                    return jsonify({
+                        "type": "intervention",
+                        "intent": new_intent,
+                        "answer": answer,
+                        "result": intervention_result,
+                        "superseded_original": True,
+                        "refresh_required": True,
+                    })
+                if superseding and any(k in _user_text for k in _confirm_old_keywords):
+                    # 用户明确选择原动作：清掉 superseding 避免后续污染，走原 confirm 流程
+                    if hasattr(task_manager, "update_pending_intervention_fields"):
+                        task_manager.update_pending_intervention_fields(task_id, {
+                            "superseding_proposal": None,
+                        })
+                    else:
+                        try:
+                            pending["superseding_proposal"] = None
+                        except Exception:
+                            pass
+                    pending = task_manager.get_pending_intervention(task_manager.get_task_status(task_id) or task_state) or pending
+                    decision_info = {"decision": "confirm", "confidence": 1.0, "reason": "user_explicit_confirm_original"}
+                else:
+                    decision_info = query_responder.classify_confirmation(user_message, pending, task_state)
                 decision = decision_info.get("decision")
 
                 if decision == "confirm":
@@ -273,10 +394,34 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
                     })
 
                 pending_intent = pending.get("intent") or (pending.get("raw_intent") or {}).get("intent") or "intervention"
+                # 非 query / 非 confirm / 非 cancel：用户可能又提了一个新请求（没命中显式关键词），也一并记录到历史
+                if result["type"] in {"control", "write"} and result.get("action"):
+                    soft_proposal = {
+                        "action": result["action"],
+                        "user_message": user_message,
+                        "intent": result["type"],
+                        "timestamp": time.time(),
+                        "implicit": True,
+                    }
+                    history = list(pending.get("new_intervention_history") or [])
+                    history.append(soft_proposal)
+                    if hasattr(task_manager, "update_pending_intervention_fields"):
+                        task_manager.update_pending_intervention_fields(task_id, {
+                            "new_intervention_history": history,
+                        })
+                    else:
+                        try:
+                            pending["new_intervention_history"] = history
+                        except Exception:
+                            pass
                 answer = query_responder.generate_reply(
                     reply_intent=(
-                        "当前已有一个待确认的流程控制或写入请求。用户本轮提出了新的流程控制或写入请求，"
-                        "请说明不会覆盖原待确认动作，并要求用户先回复“确认”或“取消”。"
+                        "当前已有一个待确认的流程控制或写入请求。用户本轮又提出了新的流程控制或写入请求，"
+                        "请先复述原待确认动作和用户本轮请求的区别，再给出三种选择："
+                        "1）回复“确认原动作”或“确认原来的”——执行原待确认动作；"
+                        "2）回复“确认新动作”或“确认覆盖”——执行本轮最新请求；"
+                        "3）回复“取消”或“取消全部”——两边都不执行。"
+                        "要求用户三选一后再继续。"
                     ),
                     user_message=user_message,
                     task_state=task_state,

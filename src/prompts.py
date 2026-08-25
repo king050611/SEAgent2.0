@@ -107,18 +107,26 @@ CONFIRM_PROMPT = """\
 当前任务状态摘要：
 {task_summary}
 
+{superseding_section}
+
+{new_history_section}
+
 输出规则：
 1. 只能输出一个 JSON 对象，不能输出解释、Markdown 或代码块。
 2. decision 只能是 confirm、cancel、other 三者之一。
-3. 用户明确表示确认执行当前待确认干预、同意执行、可以执行、继续执行、没问题可以改、确认修改、确认回退时，输出：{{"decision":"confirm","confidence":0.0到1.0}}
-4. 用户明确表示取消、不要、撤销、先不改、停止、算了时，输出：{{"decision":"cancel","confidence":0.0到1.0}}
-5. 用户没有明确确认或取消，包括询问当前状态、进度、卡点、判据、干预影响、是否已经执行、提出新问题、补充模糊条件、闲聊时，输出：{{"decision":"other","confidence":0.0到1.0}}
+3. 用户明确表示确认执行**原待确认干预动作**（如"确认原动作"、"确认原来的"、"执行旧的"、"确认旧"），或单独回复"确认/确定/可以/执行/同意"且未提出新动作时，输出：{{"decision":"confirm","confidence":0.0到1.0}}
+4. 用户明确表示**确认新动作/覆盖原请求**（如"确认新动作"、"确认覆盖"、"执行新的"、"用新的那个"、"确认新"）时，由于新动作已经由上游流程处理，你应判断此消息与原 pending 动作不匹配，输出：{{"decision":"other","confidence":0.0到1.0,"reason":"user_intends_superseding_action"}}
+5. 用户明确表示取消、不要、撤销、先不改、停止、算了、"取消全部"时，输出：{{"decision":"cancel","confidence":0.0到1.0}}
+6. 用户没有明确确认或取消，包括询问当前状态、进度、卡点、判据、干预影响、是否已经执行、提出新问题、补充模糊条件、闲聊时，或用户在【新提出的候选动作/历史】存在的情况下单独回复"确认"且未指定确认哪一个时（存在歧义），输出：{{"decision":"other","confidence":0.0到1.0}}
+7. 特别注意：若 {superseding_warning_flag} 为 true，说明"用户上一轮刚刚提出了新的流程干预动作"，此时用户若只回复模糊的"确认/确定/可以"，**不要**判断为 confirm（因为存在歧义，用户可能是指确认新动作），应判断为 other 并要求用户明确"确认原动作"或"确认新动作"。
 
 
 示例：
 用户："确认" -> {{"decision":"confirm","confidence":0.99}}
-用户":"取消" -> {{"decision":"cancel","confidence":0.98}}
-用户":"再等一下" -> {{"decision":"other","confidence":0.85}}
+用户："取消" -> {{"decision":"cancel","confidence":0.98}}
+用户："再等一下" -> {{"decision":"other","confidence":0.85}}
+用户："确认覆盖" -> {{"decision":"other","confidence":0.96,"reason":"user_intends_superseding_action"}}
+用户："确认原来的" -> {{"decision":"confirm","confidence":0.97}}
 """
 
 
