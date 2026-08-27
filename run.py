@@ -14,17 +14,6 @@ import subprocess
 import signal
 import socket
 
-# libgomp expects OMP_NUM_THREADS to be a positive integer. Some managed
-# notebook/container shells export an empty or malformed value, which prints a
-# warning before torch/vLLM imports.
-omp_threads = os.environ.get("OMP_NUM_THREADS")
-if omp_threads is not None:
-    try:
-        if int(omp_threads) <= 0:
-            os.environ["OMP_NUM_THREADS"] = "1"
-    except ValueError:
-        os.environ["OMP_NUM_THREADS"] = "1"
-
 # 添加项目根目录到 sys.path
 sys.path.insert(0, str(Path(__file__).parent))
 
