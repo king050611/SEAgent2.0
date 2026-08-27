@@ -18,13 +18,14 @@ from typing import Any, Callable, Dict, List, Optional
 try:
     from sqlalchemy import create_engine, text
     from sqlalchemy.orm import Session, sessionmaker
+    from .models import Base, Task, Subtask, AuditLog, CacheMeta
     HAS_SQLALCHEMY = True
 except Exception:  # pragma: no cover - optional dependency
     create_engine = None  # type: ignore
     Session = None  # type: ignore
+    sessionmaker = None  # type: ignore
+    Base = Task = Subtask = AuditLog = CacheMeta = None  # type: ignore
     HAS_SQLALCHEMY = False
-
-from .models import Base, Task, Subtask, AuditLog, CacheMeta
 
 logger = logging.getLogger(__name__)
 
