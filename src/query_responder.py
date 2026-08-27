@@ -8,30 +8,16 @@ query_responder.py – 大模型统一处理用户消息。
 - 业务代码只做 JSON 容错、动作字段最小校验和执行编排。
 """
 
-import hashlib
 import json
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List
 
 import yaml
 from .llm_client import LLMClient
 from .prompts import CLASSIFY_PROMPT, CONFIRM_PROMPT, REPLY_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
-
-try:
-    from .llm_gateway import (
-        LLMGateway,
-        GatewayResult,
-        WriteActionGuardrail,
-    )
-    _HAS_GATEWAY = True
-except Exception:  # pragma: no cover - 兼容没有 Gateway 的环境
-    LLMGateway = Any  # type: ignore
-    GatewayResult = Any  # type: ignore
-    WriteActionGuardrail = Any  # type: ignore
-    _HAS_GATEWAY = False
 
 
 class QueryResponder:
@@ -63,89 +49,15 @@ class QueryResponder:
     MIN_MUTATION_CONFIDENCE = 0.75
     VALID_CONFIRM_DECISIONS = {"confirm", "cancel", "other"}
 
-    def __init__(self, llm: LLMClient, task_manager=None, *,
-                 llm_gateway: Optional["LLMGateway"] = None,
-                 guardrail: Optional["WriteActionGuardrail"] = None,
-                 audit_cb=None):
+    def __init__(self, llm: LLMClient, task_manager=None):
         self.llm = llm
         self.task_manager = task_manager  # 可选，用于全局模式
-        self.gateway = llm_gateway if (_HAS_GATEWAY and llm_gateway is not None) else None
-        self.guardrail = guardrail
-        self.audit_cb = audit_cb  # 可选：def(task_id, subtask_id, action_category, payload, result_ok, decision_path) -> None
         # ########## 修改内容：加载 criteria.yaml 中的判据解释，用于自然语言说明未满足判据含义。 ################
         self.criteria_config = self._load_criteria_config()
         # ################
         # ########## Bug A 修复：动态构建 WRITABLE_PARAMETERS，包含所有判据阈值字段（规则类参数） ################
         self.WRITABLE_PARAMETERS = self._build_writable_parameters()
         # ################
-        # 升级：如果有 Guardrail 则同步注入它的白名单
-        if self.guardrail is not None:
-            self.guardrail.update_rule_params(self.WRITABLE_PARAMETERS)
-
-    # ---------- 升级新增：状态摘要 + 缓存 digest ----------
-    @staticmethod
-    def _state_digest(task_state: Dict[str, Any]) -> str:
-        """生成任务状态摘要指纹（缓存key）。只包含真正驱动回复差异的字段。"""
-        if not isinstance(task_state, dict):
-            return "none"
-        compact = {
-            "ts": task_state.get("task_id"),
-            "st": task_state.get("overall_status"),
-            "cs": task_state.get("current_subtask"),
-            "anom": bool((task_state.get("anomaly_state") or {}).get("active_anomalies")),
-            "pend": 1 if task_state.get("pending_intervention") else 0,
-            "subl": [
-                (s.get("subtask_id"), s.get("status"), s.get("retry_count"),
-                 (s.get("completion_criteria") or {}).get("hard_unmet_count", 0) if isinstance(s.get("completion_criteria"), dict) else 0)
-                for s in (task_state.get("subtasks") or [])
-            ],
-        }
-        raw = json.dumps(compact, ensure_ascii=False, sort_keys=True)
-        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
-
-    # ---------- 升级新增：语义边界预分类（第一重规则门） ----------
-    def _rule_pre_gate(self, user_message: str) -> Tuple[Optional[str], Dict[str, Any]]:
-        """
-        第一重: 规则语义判断 (零成本、1ms)
-        返回 (action_type_hint, meta)
-        """
-        ctrl = self._explicit_control_action_from_message(user_message)
-        if ctrl:
-            return "control", {"control_hint": ctrl}
-        write = self._explicit_write_semantic_from_message(user_message)
-        if write:
-            return "write", {"write_hint": write}
-        if self._looks_like_query(user_message, task_state=None):
-            return "query", {}
-        return None, {}
-
-    def _llm_validate_against_hint(self, intent_info: Dict[str, Any], rule_hint: str, write_hint: Optional[str]) -> Dict[str, Any]:
-        """LLM结果必须与规则门一致，否则降级 clarification（第二重门）。"""
-        if not rule_hint:
-            return intent_info
-        intent = intent_info.get("intent")
-        if rule_hint == "write" and write_hint:
-            if intent == "write":
-                act = (intent_info.get("action") or {}).get("action")
-                if act and act != write_hint:
-                    return self._clarification_result(intent_info, f"write_semantic_mismatch_rule_says_{write_hint}_llm_says_{act}")
-            elif intent not in {"query", "irrelevant"}:
-                return self._clarification_result(intent_info, f"rule_write_but_llm_{intent}")
-        if rule_hint == "control" and intent not in {"control", "query", "irrelevant"}:
-            return self._clarification_result(intent_info, f"rule_control_but_llm_{intent}")
-        return intent_info
-
-    def _audit(self, task_state: Dict[str, Any], action_category: str, action_payload: Optional[Dict[str, Any]], result_ok: bool, decision_path: str, user_message: Optional[str] = None) -> None:
-        if not self.audit_cb:
-            return
-        try:
-            tid = (task_state or {}).get("task_id")
-            sid = (task_state or {}).get("current_subtask")
-            self.audit_cb(task_id=tid, subtask_id=sid, user_message=user_message,
-                          action_category=action_category, action_payload=action_payload,
-                          result_ok=result_ok, decision_path=decision_path)
-        except Exception as exc:
-            logger.debug("audit failed: %s", exc)
 
     # ---------- 原有方法保持不变 ----------
     def process(self, user_message: str, task_state: Dict[str, Any]) -> Dict[str, Any]:
@@ -166,40 +78,10 @@ class QueryResponder:
                 task_state=task_state,
                 operation_result={"error": "no_pending_intervention_to_confirm", "message": "当前没有待确认操作。"},
             )
-            self._audit(task_state, action_category="query", action_payload=None, result_ok=True,
-                        decision_path="rule:standalone_confirm_shortcircuit", user_message=user_message)
             return {"type": "irrelevant", "intent": "irrelevant", "answer": answer}
         # ########################################################################
 
-        # ---------- 升级：第一重规则语义门 ----------
-        rule_hint, meta = self._rule_pre_gate(user_message)
-
-        intent_info = self._classify_intent(user_message, task_state, rule_hint=rule_hint, meta=meta)
-        # ---------- 升级：第二重 LLM vs 规则一致性检查 ----------
-        intent_info = self._llm_validate_against_hint(intent_info, rule_hint, meta.get("write_hint"))
-        # ---------- 升级：第三重 Guardrail（第三重门） ----------
-        if intent_info.get("intent") in {"control", "write"}:
-            act = intent_info.get("action")
-            if isinstance(act, dict) and self.guardrail is not None:
-                ok, reason = self.guardrail.validate(act.get("action", intent_info.get("intent")), act)
-                if not ok:
-                    logger.warning("Guardrail blocked intent %s: %s", intent_info.get("intent"), reason)
-                    blocked_answer = self.generate_reply(
-                        reply_intent=(
-                            f"用户提出的写入请求被白名单机制拒绝。拒绝理由：{reason}。"
-                            "回复应先明确说明不能执行的原因和正确的表达方法，再提示修改措辞后重试；不要实际修改任务。"
-                        ),
-                        user_message=user_message,
-                        task_state=task_state,
-                        operation_result={"error": "guardrail_blocked", "message": reason},
-                    )
-                    self._audit(task_state, action_category=intent_info["intent"], action_payload=act,
-                                result_ok=False, decision_path="guardrail:blocked", user_message=user_message)
-                    return {"type": "irrelevant", "intent": "irrelevant", "answer": blocked_answer}
-            self._audit(task_state, action_category=intent_info.get("intent", "unknown"),
-                        action_payload=act if isinstance(act, dict) else None, result_ok=True,
-                        decision_path=intent_info.get("reason", "llm:default"), user_message=user_message)
-
+        intent_info = self._classify_intent(user_message, task_state)
         intent = intent_info.get("intent")
 
         if intent == "query":
@@ -446,29 +328,12 @@ class QueryResponder:
             new_history_section=new_history_section,
             superseding_warning_flag=superseding_warning_flag,
         )
-        messages = [{"role": "user", "content": prompt}]
-        default = {"decision": "other", "confidence": 0.0}
-        if self.gateway is not None:
-            # 优先走 Gateway（缓存命中短路）
-            gwr = self.gateway.process({
-                "task_id": task_state.get("task_id"),
-                "state_digest": self._state_digest(task_state) + ":confirm",
-                "message": user_message,
-                "kind": "confirm",
-                "messages": messages,
-                "temperature": 0.0,
-                "max_tokens": 250,
-            })
-            if gwr.blocked:
-                return {"decision": "other", "confidence": 0.0}
-            result = gwr.response if isinstance(gwr.response, dict) else default
-        else:
-            result = self._safe_extract_json(
-                messages,
-                max_tokens=250,
-                default=default,
-                log_tag="classify_confirmation",
-            )
+        result = self._safe_extract_json(
+            [{"role": "user", "content": prompt}],
+            max_tokens=250,
+            default={"decision": "other", "confidence": 0.0},
+            log_tag="classify_confirmation",
+        )
         if not isinstance(result, dict):
             return {"decision": "other", "confidence": 0.0}
         if result.get("decision") not in self.VALID_CONFIRM_DECISIONS:
@@ -698,29 +563,8 @@ class QueryResponder:
             {"role": "user", "content": user_message},
         ]
         try:
-            if self.gateway is not None:
-                # 通过 Gateway：缓存命中短路 + 控制层超时/重试 + 路由
-                gw_req = {
-                    "task_id": task_state.get("task_id"),
-                    "state_digest": self._state_digest(task_state),
-                    "message": user_message,
-                    "kind": "reply",
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                }
-                gwr = self.gateway.process(gw_req)
-                if gwr.blocked:
-                    raise RuntimeError(f"gateway blocked: {gwr.error}")
-                if isinstance(gwr.response, dict):
-                    text = gwr.response.get("text") or ""
-                else:
-                    text = ""
-                if not text:
-                    logger.warning("Gateway generate_reply returned empty text (cache=%s route=%s)", gwr.cache_layer, gwr.model_route)
-            else:
-                text = self.llm.generate(messages, temperature=temperature, max_tokens=max_tokens)
-            response = self._filter_model_name(text).strip()
+            response = self.llm.generate(messages, temperature=temperature, max_tokens=max_tokens)
+            response = self._filter_model_name(response).strip()
             if response:
                 return response
             logger.warning("LLM generate_reply returned empty text")
@@ -1226,72 +1070,22 @@ class QueryResponder:
             return True
         return action_type == explicit
 
-    def _classify_intent(self, user_message: str, task_state: Dict[str, Any], *,
-                         rule_hint: Optional[str] = None, meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """调用 LLM 判断意图。失败时降级为 irrelevant，避免误操作任务。
-
-        升级：若 Gateway 可用，经 Gateway 走（缓存命中短路 + 控制层 + Guardrails）。
-        同时，注入第一重规则提示词 hint，引导 LLM 不要与规则矛盾。
-        """
+    def _classify_intent(self, user_message: str, task_state: Dict[str, Any]) -> Dict[str, Any]:
+        """调用 LLM 判断意图。失败时降级为 irrelevant，避免误操作任务。"""
         summary = self._task_summary(task_state)
         available_subtasks = [
             {"id": st.get("subtask_id"), "name": st.get("name"), "status": st.get("status")}
             for st in task_state.get("subtasks", [])
         ]
-        rule_hint_block = ""
-        if rule_hint:
-            if rule_hint == "write":
-                sh = (meta or {}).get("write_hint")
-                rule_hint_block = (
-                    f"\n\n【系统规则预分类结果（请遵循，不要违背）】"
-                    f"\n根据用户消息关键词规则语义，该请求大概率属于 {rule_hint} 意图。"
-                    f"语义分类判断为：{sh}（change_parameter 代表修改阈值/规则/参数；override_field 代表修正实际测得值）。"
-                    f"除非非常确定用户意图与规则相反，否则应与规则保持一致。"
-                    + (f"\n如果输出 write 意图，其 action.action 必须等于 '{sh}'，否则视为解析失败。" if sh else "")
-                )
-            elif rule_hint == "control":
-                ch = (meta or {}).get("control_hint")
-                rule_hint_block = (
-                    f"\n\n【系统规则预分类结果（请遵循，不要违背）】"
-                    f"\n根据用户消息关键词规则语义，该请求大概率属于 control 类型动作 '{ch}'。"
-                    f"除非非常确定用户意图与规则相反，否则应与规则保持一致。"
-                )
-            elif rule_hint == "query":
-                rule_hint_block = (
-                    "\n\n【系统规则预分类结果】"
-                    "\n根据关键词判断该消息疑似任务查询。若消息确实与当前任务相关，请输出 query 意图。"
-                )
         prompt = CLASSIFY_PROMPT.format(
             user_message=user_message,
             task_summary=json.dumps(summary, ensure_ascii=False),
             available_subtasks=json.dumps(available_subtasks, ensure_ascii=False),
             available_basic_fields=json.dumps(self._available_basic_fields(task_state), ensure_ascii=False),
             available_criteria=json.dumps(self._available_criteria_for_prompt(task_state), ensure_ascii=False),
-        ) + rule_hint_block
-        messages = [{"role": "user", "content": prompt}]
-        # ---------- Gateway 路径 ----------
-        if self.gateway is not None:
-            req = {
-                "task_id": task_state.get("task_id"),
-                "state_digest": self._state_digest(task_state),
-                "message": user_message,
-                "kind": "classify",
-                "messages": messages,
-                "temperature": 0.1,
-                "max_tokens": 500,
-            }
-            gwr: GatewayResult = self.gateway.process(req)
-            logger.info("Gateway classify decision=%s cache=%s route=%s ms=%s err=%s",
-                        gwr.decision_path, gwr.cache_layer, gwr.model_route, gwr.latency_ms, gwr.error)
-            if gwr.blocked:
-                return {"intent": "irrelevant", "confidence": 0.0, "gateway_blocked": True, "reason": gwr.error}
-            if isinstance(gwr.response, dict):
-                return self._normalize_intent_info(gwr.response, task_state, user_message)
-            # Gateway 成功但非 dict → fallback
-            return {"intent": "irrelevant", "confidence": 0.0, "reason": "gateway_non_dict_response"}
-        # ---------- Legacy 路径 ----------
+        )
         result = self._safe_extract_json(
-            messages,
+            [{"role": "user", "content": prompt}],
             max_tokens=500,
             default={"intent": "irrelevant", "confidence": 0.0},
             log_tag="classify_intent",

@@ -36,9 +36,6 @@ from src.query_responder import QueryResponder
 from src.state_monitor import StateMonitor
 from src.task_scanner import TaskScanner
 from src.utils import load_yaml_config, resolve_path_from_base
-# ############# 升级新增模块 #############
-from src.db.store import DBStateStore
-from src.llm_gateway import LLMGateway, CacheLayer, WriteActionGuardrail, IntentRouterLite, ControlPolicy
 
 # 强制离线环境
 os.environ["TRANSFORMERS_OFFLINE"] = "1"
@@ -213,29 +210,6 @@ def background_scanner(scanner: TaskScanner, interval: int = 60):
         scanner.scan_and_create()
 
 
-def _extract_criteria_threshold_keys(cfg: dict) -> set:
-    """收集 criteria.yaml 中所有的阈值字段名（供 Guardrail 白名单校验）。"""
-    keys: set = {"timeout_seconds", "max_retries"}
-    if not isinstance(cfg, dict):
-        return keys
-    for _k, v in cfg.items():
-        if isinstance(v, dict):
-            for inner_k in v.keys():
-                if any(tag in inner_k.lower() for tag in ("max", "min", "threshold", "limit", "timeout", "retry", "_m", "_mm", "percent")):
-                    keys.add(inner_k)
-    return keys
-
-
-def _make_stat_cb(db_store):
-    def _bump(layer: str, hit: bool) -> None:
-        try:
-            if db_store is not None:
-                db_store.bump_cache_stat(layer, hit=hit)
-        except Exception:
-            pass
-    return _bump
-
-
 def startup():
     """初始化所有组件"""
     # ----- 启动前清理 -----
@@ -250,53 +224,20 @@ def startup():
         trust_remote_code=True,
         local_files_only=True,
     )
-    # 2026-08 upgrade: vLLM 生产级参数调优
-    # - max_num_seqs=128 （业界实测基准：并发50下TTFT从24s→143ms）
-    # - gpu_memory_utilization=0.85 （防止OOM，生产推荐 0.80~0.85）
-    # - max_model_len=8192 （场景输入<1k+输出<0.5k，节省KV空间多装4倍并发）
-    # - enable_prefix_caching （system prompt共享，KV节省30-50%）
-    print("Loading vLLM model (production-grade tuned)...")
+    print("Loading vLLM model...")
     llm_engine = LLM(
         model=LOCAL_MODEL_PATH,
         trust_remote_code=True,
         dtype="bfloat16" if torch.cuda.is_bf16_supported() else "float16",
-        max_num_seqs=int(os.environ.get("VLLM_MAX_NUM_SEQS", "128")),
-        gpu_memory_utilization=float(os.environ.get("VLLM_GPU_UTIL", "0.85")),
-        max_model_len=int(os.environ.get("VLLM_MAX_MODEL_LEN", "8192")),
-        enable_prefix_caching=True,
-        enforce_eager=False,
+        max_num_seqs=1,
     )
     llm_client = LLMClient(llm_engine, tok)
 
-    # 2. 持久化存储：双写兼容模式（JSON + DB）
+    # 2. 持久化存储（任务状态存放在 data/tasks/ 下）
     storage_dir = MONITOR_CONFIG["persistence"].get("directory", "data/tasks")
-    json_store = StateStore(storage_dir)
-    try:
-        db_url = os.environ.get("DATABASE_URL") or MONITOR_CONFIG.get("persistence", {}).get("database_url")
-        db_store = DBStateStore(storage_dir=storage_dir, db_url=db_url)
-        # 双写 StateStore：所有写入同步到 JSON + DB，读优先从 DB（若 DB 空则回退 JSON）
-        from src.db.dual_store import DualWriteStore
-        state_store = DualWriteStore(primary=json_store, secondary=db_store)
-        print(f"✅ Dual write store initialized: JSON({storage_dir}) + DB({db_store.engine.url.render_as_string(hide_password=True)})")
-    except Exception as exc:
-        print(f"⚠️  DB store unavailable, fallback to JSON only: {exc}")
-        state_store = json_store
-        db_store = None
+    state_store = StateStore(storage_dir)
 
-    # 3. 升级：组装 LLM Gateway（三层缓存 + 语义路由 + 控制层 + Guardrails）
-    redis_url = os.environ.get("REDIS_URL")
-    threshold_keys = _extract_criteria_threshold_keys(CRITERIA_CONFIG)
-    cache = CacheLayer(redis_url=redis_url, bump_stat_cb=_make_stat_cb(db_store))
-    guardrail = WriteActionGuardrail(criteria_threshold_keys=threshold_keys)
-    llm_gateway = LLMGateway(
-        llm_client,
-        cache=cache,
-        control=ControlPolicy(call_timeout_sec=30.0, max_retries=2),
-        guardrail=guardrail,
-        router=IntentRouterLite(),
-    )
-
-    # 4. 核心组件
+    # 3. 核心组件
     task_decomposer = TaskDecomposer(TASK_TEMPLATES)
     criteria_evaluator = CriteriaEvaluator(CRITERIA_CONFIG, STATE_MAPPING)
     anomaly_handler = AnomalyHandler(TASK_TEMPLATES, state_store)
@@ -304,8 +245,7 @@ def startup():
     anomaly_advisor = AnomalyAdvisor(llm_client=llm_client)
     # ############# anomaly advisor 接入结束 #############
     intervention_handler = InterventionHandler(llm_client, task_decomposer, state_store, criteria_evaluator)
-    # QueryResponder 注入 Gateway（保留老构造签名向后兼容）
-    query_responder = QueryResponder(llm_client, llm_gateway=llm_gateway, guardrail=guardrail)
+    query_responder = QueryResponder(llm_client)
     state_monitor = StateMonitor(state_store, criteria_evaluator, STATE_MAPPING, query_responder)
 
     task_manager = TaskManager(
