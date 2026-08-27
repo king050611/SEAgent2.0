@@ -438,16 +438,11 @@ def create_app(task_manager, query_responder, state_monitor, state_store, task_s
             result = query_responder.process(user_message, task_state)
 
             if _is_standalone_confirmation_message(user_message):
-                current = task_state.get("current_subtask") or "当前子任务"
-                current_name = ""
-                for st in task_state.get("subtasks", []):
-                    if st.get("subtask_id") == current and st.get("name"):
-                        current_name = f"“{st.get('name')}”"
-                        break
-                answer = (
-                    f"当前没有待确认操作，任务状态未被修改。"
-                    f"目前推进到 {current}{current_name}，如需继续处理，请先发起明确动作，"
-                    f"例如重试、回退、修改参数或人工完成。"
+                answer = query_responder.generate_reply(
+                    reply_intent="当前没有待确认的流程控制或写入请求。请说明用户需要先发起明确动作，例如重试、回退、修改或人工完成；不要修改任务状态。",
+                    user_message=user_message,
+                    task_state=task_state,
+                    operation_result={"error": "no_pending_intervention_to_confirm", "message": "当前没有待确认操作。"},
                 )
                 return jsonify({"type": "irrelevant", "intent": "irrelevant", "answer": answer, "refresh_required": False})
 

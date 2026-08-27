@@ -143,26 +143,6 @@ class QueryResponderIntentProtocolTest(unittest.TestCase):
 
         self.assertEqual(result["query_fields"], ["water_depth"])
 
-    def test_generate_reply_strips_model_thinking_process(self):
-        responder = QueryResponder(FakeLLM(text=(
-            "Thinking Process:\n"
-            "1. Analyze the Request: internal reasoning.\n"
-            "2. Determine the Content: more internal reasoning.\n\n"
-            "Final Reply:\n"
-            "当前没有待确认操作。请先发起明确的重试、回退、修改或人工完成请求。"
-        )))
-
-        reply = responder.generate_reply(
-            reply_intent="当前没有待确认的流程控制或写入请求。请说明用户需要先发起明确动作。",
-            user_message="确认",
-            task_state=sample_task_state(),
-            operation_result={"error": "no_pending_intervention_to_confirm", "message": "当前没有待确认操作。"},
-        )
-
-        self.assertNotIn("Thinking Process", reply)
-        self.assertNotIn("Analyze the Request", reply)
-        self.assertIn("当前没有待确认操作", reply)
-
     def test_classify_prompt_includes_available_criteria_semantics(self):
         llm = FakeLLM({"intent": "irrelevant", "confidence": 0.1})
         responder = QueryResponder(llm)

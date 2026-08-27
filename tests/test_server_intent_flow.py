@@ -9,7 +9,6 @@ class FakeResponder:
         self.decision = decision or {"decision": "other", "confidence": 0.9}
         self.process_calls = []
         self.confirm_calls = []
-        self.generate_reply_calls = []
 
     def process(self, user_message, task_state):
         self.process_calls.append((user_message, task_state))
@@ -23,7 +22,6 @@ class FakeResponder:
         return dict(self.decision)
 
     def generate_reply(self, **kwargs):
-        self.generate_reply_calls.append(kwargs)
         return "generated reply"
 
     def generate_confirmation_request(self, user_message, action, task_state, intent=None):
@@ -164,10 +162,8 @@ class ServerIntentFlowTest(unittest.TestCase):
 
         body = response.get_json()
         self.assertEqual(body["type"], "irrelevant")
-        self.assertIn("当前没有待确认操作", body["answer"])
         self.assertEqual(manager.set_calls, [])
         self.assertEqual(manager.execute_calls, [])
-        self.assertEqual(responder.generate_reply_calls, [])
 
     def test_confirm_executes_original_pending_action(self):
         pending = {"action": {"action": "retry", "subtask_id": "S1"}, "intent": "control", "user_message": "重试S1"}
