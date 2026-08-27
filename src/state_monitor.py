@@ -170,9 +170,64 @@ class StateMonitor:
         1. 检测到软硬判据均已达标，列出具体指标和实际值；
         2. 当前子任务状态转变（in_progress -> waiting_approval）；
         3. 需要人工审核同意。
-        使用确定性模板生成，避免大模型把内部分析或提示词泄露到前端通知。
+        优先使用大模型生成，失败时使用后备模板。
         """
-        return self._build_fallback_notification(subtask_id, task_state, criteria_result)
+        # 后备模板函数
+        def fallback():
+            return self._build_fallback_notification(subtask_id, task_state, criteria_result)
+
+        if not self.query_responder:
+            return fallback()
+
+        # 获取子任务名称
+        subtask_name = subtask_id
+        for st in task_state.get("subtasks", []):
+            if st.get("subtask_id") == subtask_id:
+                subtask_name = st.get("name", subtask_id)
+                break
+
+        # 提取判据详情供大模型参考
+        hard_details = criteria_result.get("hard_details", {})
+        soft_details = criteria_result.get("soft_details", {})
+
+        # 明确要求三段式输出
+        reply_intent = (
+            f"系统通知：子任务 {subtask_id}（{subtask_name}）已完成所有判据，需要人工审核。"
+            f"请严格按照以下三段式结构输出通知（每段之间空一行）："
+            f"第一段：说明检测到软硬判据均已达标，并逐一列出所有硬判据和软判据的具体指标和实际值（从提供的判据详情中提取）。"
+            f"第二段：说明当前子任务状态从 'in_progress' 转变为 'waiting_approval'。"
+            f"第三段：明确提示需要人工审核同意才能继续推进。"
+            f"不要添加额外内容，只输出这三段。"
+        )
+
+        try:
+            notification = self.query_responder.generate_reply(
+                reply_intent=reply_intent,
+                user_message="系统自动通知",
+                task_state=task_state,
+                operation_result={
+                    "subtask_id": subtask_id,
+                    "subtask_name": subtask_name,
+                    "status": "waiting_approval",
+                    "hard_details": hard_details,
+                    "soft_details": soft_details,
+                    "hard_met": criteria_result.get("hard_met"),
+                    "soft_met": criteria_result.get("soft_met"),
+                },
+                temperature=0.3,
+                max_tokens=450  # 足够容纳三段式内容
+            )
+            if notification:
+                # 简单验证是否包含三个段落（至少有两个换行），若不满足则回退
+                if notification.count('\n') >= 2:
+                    return notification.strip()
+                else:
+                    logger.warning("Generated notification lacks three paragraphs, using fallback.")
+                    return fallback()
+        except Exception as e:
+            logger.exception("生成审核通知失败: %s", e)
+
+        return fallback()
 
     def _build_fallback_notification(self, subtask_id: str, task_state: Dict, criteria_result: Dict) -> str:
         """
