@@ -14,6 +14,23 @@ import subprocess
 import signal
 import socket
 
+
+def _ensure_positive_thread_env(var_name: str, default: str = "1"):
+    """Normalize thread-count env vars before torch/vLLM read them."""
+    value = os.environ.get(var_name)
+    if value is None:
+        return
+    try:
+        if int(value) > 0:
+            return
+    except (TypeError, ValueError):
+        pass
+    os.environ[var_name] = default
+
+
+for _thread_var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    _ensure_positive_thread_env(_thread_var)
+
 # 添加项目根目录到 sys.path
 sys.path.insert(0, str(Path(__file__).parent))
 
