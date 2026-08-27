@@ -11,6 +11,7 @@ query_responder.py – 大模型统一处理用户消息。
 import hashlib
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -720,7 +721,7 @@ class QueryResponder:
                     logger.warning("Gateway generate_reply returned empty text (cache=%s route=%s)", gwr.cache_layer, gwr.model_route)
             else:
                 text = self.llm.generate(messages, temperature=temperature, max_tokens=max_tokens)
-            response = self._filter_model_name(text).strip()
+            response = self._clean_final_reply(self._filter_model_name(text)).strip()
             if response:
                 return response
             logger.warning("LLM generate_reply returned empty text")
@@ -2190,3 +2191,43 @@ class QueryResponder:
         for word in banned:
             text = text.replace(word, "系统")
         return text
+
+    def _clean_final_reply(self, text: str) -> str:
+        """Remove model reasoning wrappers and return only user-facing text."""
+        if not text:
+            return ""
+        cleaned = text.strip()
+        cleaned = re.sub(r"```(?:text|markdown|json)?\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = cleaned.replace("```", "").strip()
+
+        final_markers = [
+            r"Final Reply\s*[:：]",
+            r"Final Answer\s*[:：]",
+            r"最终回复\s*[:：]",
+            r"最终答复\s*[:：]",
+            r"回复\s*[:：]",
+        ]
+        for marker in final_markers:
+            matches = list(re.finditer(marker, cleaned, flags=re.IGNORECASE))
+            if matches:
+                cleaned = cleaned[matches[-1].end():].strip()
+                break
+
+        reasoning_patterns = [
+            r"(?is)^thinking process\s*[:：].*?(?=(?:final reply|final answer|最终回复|最终答复|回复)\s*[:：])",
+            r"(?is)^思考过程\s*[:：].*?(?=(?:final reply|final answer|最终回复|最终答复|回复)\s*[:：])",
+            r"(?is)^分析过程\s*[:：].*?(?=(?:final reply|final answer|最终回复|最终答复|回复)\s*[:：])",
+        ]
+        for pattern in reasoning_patterns:
+            cleaned = re.sub(pattern, "", cleaned).strip()
+
+        leak_markers = (
+            "Thinking Process",
+            "Analyze the Request",
+            "Determine the Content",
+            "思考过程",
+            "分析请求",
+        )
+        if any(marker in cleaned for marker in leak_markers):
+            return ""
+        return cleaned
