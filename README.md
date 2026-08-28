@@ -1,220 +1,317 @@
-# TaskMonitor 测试集（基于task_intent_TI2026021192.json）
+# TaskMonitor README
 
-1. **启动系统**
+TaskMonitor 是一个面向水下作业任务执行过程的流程监控系统。系统接收任务 JSON 文件，根据任务配置拆分执行流程，并持续监管任务状态变化。通过状态上报、完成判据评估、异常分析以及人工审核干预，实现水下作业任务的全过程管理。
 
-```markdown
+当前可支持监控的任务包括：
+
+> 采油树控制面板插入任务
+
+---
+
+# 一、功能
+
+简单来说，系统主功能可以完成三件事：
+
+1. 加载任务文件并解析，自动拆分成结构化子任务执行流程；
+2. 根据子任务的完成判据，判断当前子任务是否达到完成要求；
+3. 支持任务状态查询，人工审核和干预。
+
+## 1. 任务加载与状态初始化
+
+任务 JSON 文件放入 `task/` 目录后，系统会扫描任务文件并创建任务状态。
+
+系统初始化内容包括：
+
+- 任务 ID；
+- 任务整体状态；
+- 根据任务类型和配置构建的任务执行流程；
+- 各子任务模块的执行状态及完成判据；
+- 任务描述信息。
+
+## 2. 子任务流程推进
+
+系统根据任务类型和任务配置，构建对应的任务执行流程。任务流程由多个独立子任务模块组成，每个子任务对应明确的执行目标和完成判据，系统通过子任务状态管理和判据评估，实现任务过程的逐阶段推进。
+
+对**采油树控制面板插入任务**来说，将任务划分为以下执行阶段：
+
+| 子任务 | 名称                           | 判据分类与未满足处理                                                                                                                                                                                                                                      |
+| ------ | ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S1     | 移动至采油树控制面板附近       | 距离误差过大，`distance_error_max > 0.1 m`；<br />姿态角偏差过大，`angle_error_max > 10°`；<br />连续稳定帧数不足，`speed_stable_frames < 5`；<br />有效网格数量不足，`min_grid_count < 10`；<br />控制面板不可见，`panel_visible_flag != 1`； |
+| S2     | 视觉识别插孔和插头的位置       | 插孔定位结果不稳定，`slot_pose_delta_max > 0.01 m`；<br />插头定位结果不稳定，`plug_pose_delta_max > 0.01 m`；<br />插孔识别结果未达到稳定状态，`slot_stable_flag != 1`；<br />插头识别结果未达到稳定状态，`plug_stable_flag != 1`；              |
+| S3     | 机械臂原点到夹取起点的路径规划 | 逆运动学无有效解，`ik_valid_flag != 1`；                                                                                                                                                                                                                |
+| S4     | 夹取插头                       | 夹取动作未完成，`grasp_done_flag != 1`；                                                                                                                                                                                                                |
+| S5     | 机械臂起点到插入终点的路径规划 | 逆运动学无有效解，`ik_valid_flag != 1`；                                                                                                                                                                                                                |
+| S6     | 执行插入                       | 插头插入动作未完成，`insert_done_flag != 1`；                                                                                                                                                                                                           |
+| S7     | 视觉确认插入结果               | 视觉检查未确认插入成功，`visual_check_flag != 1`；                                                                                                                                                                                                      |
+| S8     | 返程与复位                     | 机械臂未完成复位，`arm_reset_flag != 1`；返程位置误差过大，`return_position_error_max > 0.1 m`                                                                                                                                                        |
+
+> 注：以上子任务完成判据及其判断逻辑分别配置或实现于：
+>
+> - `config/criteria.yaml`
+> - `src/state_monitor.py`
+> - `src/criteria_evaluator.py`
+
+> 长期来看，不同任务可根据需求选择、组合或扩展不同子任务模块，从而构建对应的任务执行流程。
+
+子任务推进规则：
+
+- 系统仅在当前子任务处于 `in_progress` 状态时接收状态上报；
+- 当前子任务满足完成判据后进入 `waiting_approval` 状态；
+- 人工审核通过后推进至下一执行阶段；
+- 最后一个子任务完成审核后，整体任务状态更新为 `completed`。
+
+## 3. 完成判据判断
+
+系统根据 `criteria_details` 判断子任务是否完成。当前每个子任务都配置了对应判据。
+
+判据含义：
+
+| 类型     | 作用               | 系统处理方式                                                         |
+| -------- | ------------------ | -------------------------------------------------------------------- |
+| 判据     | 必须满足的完成条件 | 不满足时，当前子任务失败，任务流程阻断                               |
+| 人工审核 | 人工确认环节       | 判据满足后，子任务进入`waiting_approval`，人工通过后才能进入下一步 |
+
+判据判断后的状态变化：
+
+| 判据结果             | 系统状态变化                                      |
+| -------------------- | ------------------------------------------------- |
+| 判据满足             | 当前子任务进入`waiting_approval`                |
+| 判据不满足           | 当前子任务进入`failed`，任务流程阻断            |
+| 人工审核通过         | 当前子任务变为`completed`，系统推进到下一子任务 |
+| 最后阶段人工审核通过 | 任务整体变为`completed`                         |
+
+## 4. 异常状态识别
+
+在水下机器人执行任务的过程中，当某一子任务的完成判据未满足时，系统除了对任务失败进行分析外，还会进一步记录并分析相关异常状态，以判断异常是由通信、感知、规划、执行机构还是作业对象引起的。
+
+当前异常状态分为以下五类：
+
+| 异常类型       | 字段名          | 含义                                                                                                                                                                                                          | 异常判据                                           |
+| -------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| 通信与数据异常 | `data_commun` | 当前阶段所需的指令、状态或反馈数据在传输过程中出现中断、缺失、超时或不一致。                                                                                                                                  | `anomaly_state.data_commun.status == "abnormal"` |
+| 感知异常       | `perception`  | 当前阶段负责获取目标、环境、位置或姿态信息的感知与定位模块出现异常。例如 S1、S8 阶段发生异常时，模型可识别为机器人定位、姿态估计或视觉模块异常；                                                              | `anomaly_state.perception.status == "abnormal"`  |
+| 规划异常       | `planning`    | 当前阶段负责生成路径或运动轨迹的规划模块出现异常。例如 S3、S5 阶段发生异常时，模型可识别为机械臂运动规划模块异常；S1、S8 阶段发生异常时，模型可识别机器人本体运动路径规划模块异常。                           | `anomaly_state.planning.status == "abnormal"`    |
+| 执行异常       | `execution`   | 当前阶段负责完成移动或作业动作的执行机构出现异常。例如 S1、S8 阶段发生异常时，模型可识别为推进器、机器人本体运动控制模块异常；S4、S6 阶段发生异常时，模型可识别为机械臂、夹爪、末端执行器或力控执行模块异常。 | `anomaly_state.execution.status == "abnormal"`   |
+| 被控对象异常   | `plant`       | 当前阶段被 ROV 操作的目标对象或其与执行机构之间的接触关系出现异常。例如 S4 阶段发生异常时，模型可识别为插头或夹取接触状态异常；S6、S7 阶段发生异常时，可识别为插头、插孔、卡滞、错位或插入接触关系异常。      | `anomaly_state.plant.status == "abnormal"`       |
+
+各阶段异常汇总：
+
+| 阶段                                         | 关联的异常字段                                               |
+| -------------------------------------------- | ------------------------------------------------------------ |
+| **S1：移动至控制面板附近**             | `data_commun`、`perception`、`planning`、`execution` |
+| **S2：识别插孔和插头位置**             | `data_commun`、`perception`                              |
+| **S3：机械臂原点到夹取起点的路径规划** | `data_commun`、`planning`                                |
+| **S4：夹取插头**                       | `data_commun`、`perception`、`execution`、`plant`    |
+| **S5：机械臂起点到插入终点的路径规划** | `data_commun`、`planning`                                |
+| **S6：执行插入**                       | `data_commun`、`perception`、`execution`、`plant`    |
+| **S7：视觉确认插入结果**               | `data_commun`、`perception`                              |
+| **S8：返程与复位**                     | `data_commun`、`perception`、`planning`、`execution` |
+
+异常状态取值：
+
+| 取值         | 含义                         |
+| ------------ | ---------------------------- |
+| `normal`   | 当前未记录该类异常           |
+| `abnormal` | 当前记录到该类异常           |
+| `unknown`  | 当前无法确认该类状态是否正常 |
+
+## 5. 人工审核
+
+当子任务满足完成判据后，系统不会自动进入下一步，而是进入人工审核状态。
+
+人工审核流程：
+
+```text
+状态上报
+  ↓
+判据满足
+  ↓
+waiting_approval
+  ↓
+人工通过
+  ↓
+推进下一子任务
+```
+
+## 6. 人工干预
+
+当任务执行过程中出现失败、阻塞或需要人工调整时，用户可以通过聊天窗口输入干预指令，对当前任务流程进行人工管理。
+
+支持的干预类型：
+
+| 干预类型     | 示例                                           | 作用                                                                                   |
+| ------------ | ---------------------------------------------- | -------------------------------------------------------------------------------------- |
+| 重试         | `重试S4夹取阶段`                             | 重新初始化指定执行阶段。                                                               |
+| 回退         | `回退到S1`                                   | 将任务回退至指定阶段，并重置该阶段及后续阶段。                                         |
+| 阈值修改     | `将S1阶段识别面板的距离误差阈值修改为0.15米` | 修改指定阶段的判断阈值，修改后重新执行相关阶段。                                       |
+| 状态值修改   | `人工确认当前距离误差为0.05米`               | 当系统上报的数据不准确时，使用人工确认状态值进行替换，并按照原有判据重新判断当前阶段。 |
+| 人工确认完成 | `确认S4夹取阶段已经完成`                     | 人工确认指定阶段满足任务要求后，完成该阶段并推进流程。                                 |
+
+## 7. 查询问答
+
+用户可以通过前端聊天窗口查询任务状态、失败原因、异常信息和干预结果。
+
+支持的查询类型：
+
+| 查询类型         | 示例                         |
+| ---------------- | ---------------------------- |
+| 任务状态查询     | `当前任务状态如何？`       |
+| 当前子任务查询   | `现在卡在哪一步？`         |
+| 失败原因查询     | `当前任务为什么失败？`     |
+| 判据详情查询     | `S1 的判据详情是什么？`    |
+| 异常状态查询     | `当前系统有什么异常？`     |
+| 干预结果查询     | `刚才的参数修改生效了吗？` |
+| 任务基础信息查询 | `这个任务水深是多少？`     |
+
+---
+
+# 二、config 和 src
+
+SEAgent 2.0 的代码与配置主要分为三部分：
+
+1. `src/`：负责任务创建、执行状态监管、判据评估、异常处理、人工干预和任务查询；
+2. `config/`：负责定义任务流程、完成判据、状态字段映射和异常语义；
+3. 项目入口与 Web 文件：负责系统启动、接口服务和前端交互。
+
+---
+
+## 1. `src` 脚本说明
+
+| 脚本                                     | 功能说明                                                                                                                                                                                                      |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/__init__.py`                      | `src` 包的统一导出入口，目前对外导出 `LLMClient`、`load_yaml_config` 和 `get_logger`。                                                                                                                |
+| `src/server.py`                        | Web 后端接口模块，负责接收任务创建、状态上报、任务扫描、状态查询、人工审核、流程干预和任务重置等请求，并将请求转交给对应业务模块。                                                                            |
+| `src/task_manager.py`                  | 任务流程核心调度模块，负责任务创建、当前子任务管理、状态上报处理、子任务推进、人工审核、异常处理和人工干预。                                                                                                  |
+| `src/task_decomposer.py`               | 子任务流程构建与初始化模块。根据任务类型和任务配置构建对应的执行流程，并初始化任务状态、完成判据、执行数据和执行证据等字段。                                                                                  |
+| `src/task_scanner.py`                  | 任务文件扫描模块，扫描`task/` 目录中的 JSON 文件，读取任务编号和任务说明，调用 `TaskManager` 创建任务，并记录已经处理的任务文件，避免重复创建。                                                           |
+| `src/state_monitor.py`                 | 执行状态监管模块。该模块检查状态数据是否由当前子任务上报，拒绝历史阶段或后续阶段的越序更新；随后完成外部状态字段映射，保存最新状态，合并已有的人工覆盖值，更新子任务状态。                                    |
+| `src/criteria_evaluator.py`            | 完成判据评估模块，根据`criteria.yaml` 中配置的判据比较实际状态，输出各判据的目标值、实际值、满足情况、未满足字段以及是否需要人工审核。该脚本只输出评估结果。                                                |
+| `src/state_store.py`                   | 任务状态持久化模块，按照`task_id` 将每个任务的完整当前状态以 JSON 形式保存。字段包括：任务信息、子任务状态、判据结果、最新上报数据、异常信息和审核通知。                                                    |
+| `src/anomaly_handler.py`               | 任务失败流程处理模块。当当前子任务执行失败时，根据任务模板中配置的失败处理规则，返回重试、回退、人工介入或终止任务等后续处理方向。                                                                            |
+| `src/intervention_handler.py`          | 人工干预执行模块，执行人工确认后的回退、重试、参数修改和状态字段覆盖等操作。根据干预类型重置目标子任务及受影响的后续步骤，清除旧数据，避免重新执行后继续使用上一次的审核和异常结论，并重新激活目标子任务。    |
+| `src/query_responder.py`               | 用户查询和自然语言干预模块，负责识别用户输入属于任务状态查询、判据失败原因查询、流程干预还是无关内容，并根据后端提供的任务状态和处理结果生成最终自然语言回复。                                                |
+| `src/llm_client.py`                    | 本地大模型调用底座，负责构建模型输入、调用 vLLM 生成文本，并从模型回复中提取结构化 JSON，供意图识别、查询回复和异常建议模块使用。                                                                             |
+| `src/prompts.py`                       | 提示词管理模块，集中定义意图分类、干预确认和最终回复 Prompt，并约束任务状态、审核结果、失败情况和干预结果等关键事实必须来自后端任务状态。                                                                     |
+| `src/utils.py`                         | 通用工具模块，提供 YAML 配置加载、日志对象创建和时间戳获取等基础功能。                                                                                                                                        |
+| `src/anomaly_advisor/__init__.py`      | 异常建议子包的统一导出入口，对外导出`AnomalyAdvisor`。该子包读取任务状态并生成诊断建议，不直接执行重试、回退或修改任务状态。                                                                                |
+| `src/anomaly_advisor/advisor.py`       | 异常建议总控制模块，串联异常上下文构建、异常规则匹配，存储并返回完整的结构化异常建议。                                                                                                                        |
+| `src/anomaly_advisor/context.py`       | 异常分析上下文构建模块，负责汇总当前任务、当前子任务、未满足判据、最新执行状态、后端异常状态和系统处理结果，为后续异常规则匹配与建议生成提供统一数据                                                          |
+| `src/anomaly_advisor/rules.py`         | 异常规则匹配模块，读取`anomaly_advice.yaml`，将状态为 `abnormal` 的异常与当前子任务允许关联的异常类型取交集，过滤正常、未知、不支持或与当前阶段无关的异常，并确定异常优先级、候选设备系统和建议检查方向。 |
+| `src/anomaly_advisor/llm_generator.py` | 异常诊断建议生成模块，根据当前子任务、未满足判据、异常状态和规则匹配结果，优先调用本地大模型生成结构化诊断建议；模型调用失败时使用确定性模板返回。                                                            |
+
+## 2.`config` 脚本说明
+
+| 配置文件                       | 作用                     | 常改内容                                                                                                   |
+| ------------------------------ | ------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `config/monitor.yaml`        | 系统运行配置             | • 服务地址和端口；<br />• 大模型路径；<br />• 状态存储目录；<br />• 日志配置。                         |
+| `config/task_templates.yaml` | 子任务流程和异常动作配置 | • 子任务名称与顺序；<br />• 前置依赖与判据引用；<br />• 重试次数和超时时间；<br />• 异常键及处理动作。 |
+| `config/criteria.yaml`       | 子任务完成判据配置       | • 完成判据；<br />• 判据阈值；<br />• 人工审核要求；<br />• 判据未满足时的说明。                       |
+| `config/state_mapping.yaml`  | 外部字段映射配置         | • 新增外部字段；<br />• 修改外部字段；<br />• 配置内部字段映射；<br />• 调整字段命名。                 |
+| `config/anomaly_advice.yaml` | 异常语义和建议知识库     | • 异常类型和优先级；<br />• 候选设备系统；<br />• 推理提示和检查方向；<br />• 各子任务关联的异常类型。 |
+
+---
+
+# 三、系统流程
+
+`run.py` 负责加载配置和本地模型，装配各业务脚本，并通过 `server.py` 提供接口。系统整体按下面三层流程运行：
+
+1. 任务状态初始化与子任务拆分
+
+   * `task_scanner.py` 扫描并读取 `task/` 目录中的任务 JSON；通过接口创建的任务则先由 `server.py` 接收。
+   * `task_manager.py` 接收任务数据，并调用 `task_decomposer.py` 根据 `task_templates.yaml` 将任务拆分为 S1 至 S8 子任务，同时初始化整体任务状态和任务参数。
+   * `state_store.py` 将初始化后的完整任务状态持久化保存。
+2. 判据评估、失败处理与异常建议生成
+
+   * `server.py` 接收机器人状态上报，并将当前子任务状态交给 `task_manager.py` 统一调度。
+   * `state_monitor.py` 检查上报是否来自当前子任务，完成字段映射，并调用 `criteria_evaluator.py` 根据 `criteria.yaml` 评估判据。
+   * 判据满足时进入审核或推进；判据不满足时进入失败，并由 `anomaly_handler.py` 根据 `task_templates.yaml` 生成重试、回退、任务失败或人工介入等流程处理动作。
+   * 当上报中包含异常状态或需要进一步排查失败原因时，`anomaly_advisor/` 会结合 `anomaly_advice.yaml` 生成异常排查建议。
+3. 人工审核、人工干预与查询
+
+   * `server.py` 接收人工审核请求，并交给 `task_manager.py` 校验和推进子任务。
+   * `server.py` 接收用户查询和干预请求，并交给 `query_responder.py` 判断用户意图、生成查询回复或解析干预动作。
+   * 用户确认干预后，`task_manager.py` 调用 `intervention_handler.py` 执行回退、重试、参数修改、状态值修改或人工完成，并通过 `state_store.py` 更新任务状态。
+
+阶段状态机：
+
+| 状态                 | 含义                               |
+| -------------------- | ---------------------------------- |
+| `pending`          | 子任务尚未开始。                   |
+| `in_progress`      | 子任务正在执行，可以接收状态上报。 |
+| `waiting_approval` | 判据已满足，等待人工审核。         |
+| `failed`           | 硬判据未满足，流程被阻断。         |
+| `completed`        | 子任务已完成。                     |
+
+典型状态变化：
+
+```text
+pending
+  ↓
+in_progress
+  ├─ 全部判据满足 → waiting_approval → completed
+  ├─ 仅软判据不满足 → in_progress
+  └─ 硬判据不满足 → failed → 重试 / 回退 / 状态覆盖 / 人工完成
+```
+
+---
+
+# 四、启动方式
+
+进入项目目录后启动环境：
+
+```bash
+cd /root/seagent/seagent2.0
+```
+
+```bash
 python run.py
 ```
 
-2. **放置任务文件**
+启动后访问：
 
-   ```bash
-   cp task_intent_TI2026021192.json task/
-   ```
+```text
+http://服务器IP:8889
+```
 
-3. **确认任务已创建**
+本机测试：
 
-   ```bash
-   curl --noproxy '*' -s http://localhost:8889/api/tasks | jq .
-   ```
+```text
+http://localhost:8889
+```
+
+# 五、模型与环境
+
+## 1. 大语言模型
+
+SEAgent 2.0 使用本地部署的大语言模型完成任务查询、干预意图识别、人工确认判断和异常建议生成。
+
+| 项目     | 当前配置                                                            |
+| -------- | ------------------------------------------------------------------- |
+| 模型     | Qwen3.5-9B                                                          |
+| 本地路径 | `/root/autodl-tmp/Qwen3.5-9B`                                     |
+| 路径配置 | `config/monitor.yaml` 中的 `llm.model_path`                     |
+| 运行模式 | 本地离线推理                                                        |
+| 模型精度 | 默认使用`BF16` 精度推理，GPU不支持该精度时，自动切换成 `FP16`。 |
 
 ---
 
-## 三类任务对话意图
+## 2. 关键依赖
 
-- QUERY：只读取任务事实、状态、判据和异常，不修改状态。
-- CONTROL：改变流程位置或推进方式，包括 `rollback`、`retry`、`force_complete`。
-- WRITE：写入参数或人工覆盖状态事实，包括 `change_parameter`、`override_field`。
-- IRRELEVANT：与任务无关或无法可靠识别的安全出口。
+重点依赖包括：
 
-查询水深、坐标、机器人属于 QUERY。修改水深、坐标、机器人元数据不在本轮 WRITE 范围内。
-
-带有“能否、是否、为什么、怎么、会有什么影响、是否已经生效”等询问语气时，即使包含“重试、回退、修改、覆盖”等动作词，也优先作为 QUERY 处理，不会创建待确认动作。
-
-CONTROL 和 WRITE 都需要二次确认。系统返回待确认回复后，用户需发送“确认”才会执行；发送“取消”会清除待确认动作。存在待确认动作时，仍可继续查询任务事实或动作影响，但新的 CONTROL/WRITE 请求不会覆盖原待确认动作。
+- `torch`
+- `transformers`
+- `vllm`
+- `Flask`
+- `PyYAML`
 
 ---
 
-## 一、正常流程（S1 → S8 全部成功）（测试时evidence_summary应当去掉！）
-
-### S1：移动至采油树控制面板附近
-
-**判据**：硬判据 `distance_error_max<=0.1`, `angle_error_max<=10.0`, `speed_stable_frames>=5`；软判据 `min_grid_count>=10`, `panel_visible_flag=1`；
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.05,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1,"plug_stable_flag":1},"evidence_summary":"距离误差0.05m，角度误差5°，速度稳定，面板可见。"}}'
-```
-
-### S2：视觉识别插孔和插头的位置
-
-**判据**：硬判据 `slot_pose_delta_max<=0.01`, `plug_pose_delta_max<=0.01`；软判据 `slot_stable_flag=1`, `plug_stable_flag=1`；
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.005,"plug_pose_delta_m":0.006,"slot_stable_flag":1,"plug_stable_flag":1},"evidence_summary":"插孔插头位置稳定，delta均在0.01以内，稳定flag均为1。"}}'
-```
-
-### S3：机械臂原点到夹取起点的路径规划
-
-**判据**：硬判据 `ik_valid_flag=1`；
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S3","status":"reported","criteria_details":{"ik_valid_flag":1},"evidence_summary":"逆运动学求解有效。"}}'
-```
-
-### S4：夹取插头
-
-**判据**：硬判据 `grasp_done_flag=1`；
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S4","status":"reported","criteria_details":{"grasp_done_flag":1},"evidence_summary":"夹取动作完成。"}}'
-```
-
-### S5：机械臂起点到插入终点的路径规划
-
-**判据**：硬判据 `ik_valid_flag=1`
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S5","status":"reported","criteria_details":{"ik_valid_flag":1},"evidence_summary":"逆运动学求解有效。"}}'
-```
-
-### S6：执行插入
-
-**判据**：硬判据 `insert_done_flag=1`
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S6","status":"reported","criteria_details":{"insert_done_flag":1},"evidence_summary":"插入动作完成。"}}'
-```
-
-### S7：视觉 check 确认插入结果
-
-**判据**：硬判据 `visual_check_flag=1`；需要人工审核
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S7","status":"reported","criteria_details":{"visual_check_flag":1},"evidence_summary":"视觉确认插入成功。"}}'
-```
-
-### S8：返程与复位
-
-**判据**：硬判据 `arm_reset_flag=1`, `return_position_error_max<=0.1`；
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S8","status":"reported","criteria_details":{"arm_reset_flag":1,"return_position_error_m":0.03},"evidence_summary":"机械臂复位，返程误差0.03m。"}}'
-```
----
-
-## 二、异常流程及修复
-
-### 异常场景1：端口修正
-
-### S1 距离误差过大导致失败，通过重新上报正确数据恢复
-
-**模拟失败上报**
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.15,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1},"evidence_summary":"距离误差0.15m超标。"}}'
-```
-
-系统判距误差 0.15 > 0.1 → 硬判据不满足 → S1 状态变为 `failed`，任务整体状态变为 `failed`
-
-此时任何上报都会被拒绝：
-
-
-
-**修复方法**：重新上报正确的满足判据的数据（系统已修改为允许从 failed 恢复）
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.05,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1},"evidence_summary":"修正后距离误差达标。"}}'
-```
-
-此时 S1 重新变为 `waiting_approval`，任务整体恢复 `in_progress`，然后可正常审核推进。
-
-### 异常场景2：重试功能
-
-### S2 视觉估计不稳定导致失败，通过对话框指令“重试S2”恢复
-
-**模拟失败上报**（插孔位置变化过大）
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.02,"plug_pose_delta_m":0.006,"slot_stable_flag":0,"plug_stable_flag":1}}}'
-```
-
-硬判据 `slot_pose_delta_max<=0.01` 不满足 → S2 失败 → 任务状态变为 `failed`
-
-**通过自然语言对话框重试**
-
-发送 POST 请求到 `/api/query`（模拟用户在聊天框输入）
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"重试S2"}'
-```
-
-系统会返回要求确认的回复（需要二次确认）。再次发送确认消息：
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"确认"}'
-```
-
-确认后系统执行重试，S2 状态变为 `in_progress`，任务恢复。然后重新上报正确数据：
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S2","status":"reported","criteria_details":{"slot_pose_delta_m":0.005,"plug_pose_delta_m":0.006,"slot_stable_flag":1,"plug_stable_flag":1}}}'
-```
-
-正常推进。
-
-### 异常场景3：回退功能
-
-### S7 视觉 check 失败，通过对话框“回退到S5”重新执行
-
-**模拟失败上报**
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S7","status":"reported","criteria_details":{"visual_check_flag":0}}}'
-```
-
-S7 硬判据不满足 → S7 失败 → 任务失败。
-
-**通过对话框回退**
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"回退到S5"}'
-```
-
-系统要求确认，再发送：
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"确认"}'
-```
-
-回退成功后，S5、S6、S7 被重置为 pending，当前子任务变为 S5。然后重新上报 S5、S6 的正确数据，最后 S7 上报 `visual_check_flag=1` 并审核，任务继续完成。
-
-### 异常场景4：手动修正
-
-### S1 距离误差过大导致失败，通过对话框人工覆盖实际状态值恢复
-
-**模拟失败上报**（同场景1）
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/task/update -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","type":"status_update","data":{"subtask_id":"S1","status":"reported","criteria_details":{"distance_error_m":0.15,"angle_error_deg":5.0,"speed_stable_frames":5,"grid_count":15,"panel_visible_flag":1},"evidence_summary":"距离误差0.15m超标。"}}'
-```
-
-S1 失败，任务整体 `failed`。
-
-**通过对话框人工覆盖字段值（WRITE / override_field）**
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"将距离误差改为0.05米"}'
-```
-
-系统识别为 WRITE / `override_field` 动作，返回待确认回复。再次发送确认消息：
-
-```bash
-curl --noproxy '*' -X POST http://localhost:8889/api/query -H "Content-Type: application/json" -d '{"task_id":"TI2026021192","global_mode":false,"message":"确认"}'
-```
-
-确认后系统修改 `user_overrides`，重新评估判据。由于距离误差变为0.05（满足阈值），S1 硬判据全部满足，若需要人工审核则进入 `waiting_approval`，否则自动完成。
-
-此时任务整体状态恢复为 `in_progress`。
-
-
-
+# 六、当前能力总结
+
+* 支持任务准入信息读取与模板化流程生成，可识别任务ID和任务类型，接收优先级、位置、时间等任务数据，并根据任务模板拆分成若干子任务。
+* 支持接收机器人状态反馈，并根据当前阶段配置的判据，实时评估任务执行进度、判据满足情况和阶段完成状态。
+* 支持任务失败识别。当当前阶段的判据未满足时，系统判定该阶段执行失败，并记录具体未满足的判据、判据评估结果及相关状态信息；随后根据任务模板中配置的处理规则生成后续处理建议，供人工确认。
+* 支持异常状态分析，可结合当前阶段、未满足判据和异常信息，定位可能存在的问题，并生成相应的排查方向和处理建议。
+* 支持人工审核与流程干预。对于达到完成判据但需要复核的阶段，人工需要参与审核；对于执行失败、流程阻塞或上报数据不准确的情况，支持阶段重试、流程回退、判据修改、状态值校正等操作。
+* 支持自然语言交互，可通过聊天窗口查询任务进度、判据满足情况、阶段失败原因、异常状态及相关排查建议。
